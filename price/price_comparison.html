@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>模型价格对比 · Opus 4.8 vs DeepSeek-R</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --surface: #ffffff;
+    --ink: #1a1d21;
+    --ink-soft: #5b6470;
+    --ink-muted: #8a929c;
+    --border: #e3e7ec;
+    --border-strong: #cbd2da;
+    --accent: #2f6bd6;          /* Opus 列强调（冷蓝） */
+    --accent-ds: #d97a1a;       /* DeepSeek 列强调（暖橙） */
+    --zebra: #fafbfc;
+    --hover: #eef4ff;
+    --warn-bg: #fff8e6;
+    --warn-border: #f0d68a;
+    --warn-ink: #8a6d1a;
+    --code-bg: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171b;
+      --surface: #1c2026;
+      --ink: #e8ebef;
+      --ink-soft: #a8b0ba;
+      --ink-muted: #6b7480;
+      --border: #2b3138;
+      --border-strong: #3a424c;
+      --accent: #6ea1f0;
+      --accent-ds: #e5a45c;
+      --zebra: #20252c;
+      --hover: #26303d;
+      --warn-bg: #2e2716;
+      --warn-border: #5a4a1e;
+      --warn-ink: #d9be6e;
+      --code-bg: #262c33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px 20px 80px;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; }
+  h1 {
+    font-size: 26px; font-weight: 700; margin: 0 0 6px;
+    letter-spacing: -0.01em;
+  }
+  .subtitle { color: var(--ink-soft); font-size: 14px; margin: 0 0 24px; }
+  h2 {
+    font-size: 18px; font-weight: 650; margin: 40px 0 14px;
+    padding-bottom: 8px; border-bottom: 2px solid var(--border-strong);
+  }
+  p { color: var(--ink-soft); font-size: 14.5px; }
+  code {
+    background: var(--code-bg); padding: 1px 6px; border-radius: 5px;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-size: 0.88em; color: var(--ink);
+  }
+  strong { color: var(--ink); font-weight: 650; }
+
+  .banner {
+    background: var(--warn-bg); border: 1px solid var(--warn-border);
+    color: var(--warn-ink); border-radius: 10px; padding: 14px 18px;
+    font-size: 13.5px; margin: 0 0 28px;
+  }
+  .banner a { color: inherit; font-weight: 650; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden; margin: 0 0 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  thead th {
+    text-align: left; font-weight: 650; color: var(--ink-soft);
+    background: var(--surface); padding: 13px 16px;
+    border-bottom: 2px solid var(--border-strong);
+    font-size: 12.5px; text-transform: none; letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:nth-child(even) { background: var(--zebra); }
+  tbody tr:hover { background: var(--hover); }
+  .dim { color: var(--ink-muted); font-size: 12.5px; }
+  .num { font-variant-numeric: tabular-nums; font-family: "SFMono-Regular", Consolas, monospace; }
+  .col-opus { color: var(--accent); font-weight: 600; }
+  .col-ds   { color: var(--accent-ds); font-weight: 600; }
+  .mult     { font-weight: 700; }
+  th.opus, td.opus { border-left: 3px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+  th.ds,   td.ds   { border-left: 3px solid color-mix(in srgb, var(--accent-ds) 30%, transparent); }
+
+  .legend { display: flex; gap: 20px; flex-wrap: wrap; margin: 6px 2px 0; font-size: 12.5px; color: var(--ink-muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 10px; height: 10px; border-radius: 3px; }
+  .dot.opus { background: var(--accent); }
+  .dot.ds { background: var(--accent-ds); }
+
+  ul { color: var(--ink-soft); font-size: 14.5px; padding-left: 22px; }
+  li { margin: 6px 0; }
+  .foot { margin-top: 50px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--ink-muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>模型价格对比</h1>
+  <p class="subtitle">A社最强 <code>claude-opus-4-8</code> &nbsp;vs&nbsp; DeepSeek 最强 <code>deepseek-reasoner</code> · 单位：美元 / 每百万（1M）token</p>
+
+  <div class="banner">
+    ⚠️ <strong>DeepSeek 价格为「历史参考价 · 待核实」</strong>——运行环境无法访问其官网/文档，数字取自训练知识与搜索历史参考值。
+    DeepSeek 多次调价，请以 <a href="https://platform.deepseek.com/pricing" target="_blank">platform.deepseek.com/pricing</a> 当前价为准并替换。
+    Anthropic 价格来自官方数据。
+  </div>
+
+  <h2>① 四个计费维度的定义</h2>
+  <p>agent 日志里的 <code>in=899 (cache_read=0, cache_write=0) / out=77</code> 对应下面 4 个维度：</p>
+  <div class="card">
+    <table>
+      <thead><tr><th>维度</th><th>Anthropic 字段</th><th>含义</th><th>计费特点</th></tr></thead>
+      <tbody>
+        <tr><td><strong>in（输入）</strong></td><td class="dim">input_tokens</td><td>发出、<strong>未命中缓存、首次计算</strong>的 token</td><td>全价（基准）</td></tr>
+        <tr><td><strong>cache_write</strong></td><td class="dim">cache_creation_input_tokens</td><td>首次把前缀<strong>写入</strong>缓存供复用</td><td>≈ 1.25× 基准</td></tr>
+        <tr><td><strong>cache_read</strong></td><td class="dim">cache_read_input_tokens</td><td>命中缓存、<strong>从缓存读</strong>的 token</td><td>≈ 0.1× 基准（省 90%）</td></tr>
+        <tr><td><strong>out（输出）</strong></td><td class="dim">output_tokens</td><td>模型这轮<strong>生成</strong>的 token</td><td>输出价（≈输入 5×）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>② 每百万 token 单价对比</h2>
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th>维度</th>
+          <th class="opus">Opus 4.8</th>
+          <th class="ds">DeepSeek-R <span class="dim">待核</span></th>
+          <th>Opus 是几倍</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>输入 · 首次/未缓存</td><td class="opus num col-opus">$5.00</td><td class="ds num col-ds">$0.55</td><td class="num mult">≈ 9.1×</td></tr>
+        <tr><td>写缓存 · 1.25×基准</td><td class="opus num col-opus">$6.25</td><td class="ds num col-ds">$0.55 <span class="dim">（无写溢价）</span></td><td class="num mult">≈ 11.4×</td></tr>
+        <tr><td>读缓存 · 命中</td><td class="opus num col-opus">$0.50</td><td class="ds num col-ds">$0.14</td><td class="num mult">≈ 3.6×</td></tr>
+        <tr><td>输出</td><td class="opus num col-opus">$25.00</td><td class="ds num col-ds">$2.19</td><td class="num mult">≈ 11.4×</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="legend">
+    <span><span class="dot opus"></span> Opus 4.8（A社最强）</span>
+    <span><span class="dot ds"></span> DeepSeek-R（待核实）</span>
+    <span>一句话：DeepSeek-R 各维度大致便宜一个数量级。</span>
+  </div>
+
+  <h2>③ 换算到「每 1K」和「每 1 token」（心算用）</h2>
+  <div class="card">
+    <table>
+      <thead>
+        <tr><th>维度</th><th class="opus">Opus / 1K</th><th class="ds">DeepSeek / 1K</th><th class="opus">Opus / 单token</th><th class="ds">DeepSeek / 单token</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>输入首次</td><td class="opus num col-opus">$0.005</td><td class="ds num col-ds">$0.00055</td><td class="opus num col-opus">$0.000005</td><td class="ds num col-ds">$0.00000055</td></tr>
+        <tr><td>写缓存</td><td class="opus num col-opus">$0.00625</td><td class="ds num col-ds">$0.00055</td><td class="opus num col-opus">$0.00000625</td><td class="ds num col-ds">$0.00000055</td></tr>
+        <tr><td>读缓存</td><td class="opus num col-opus">$0.0005</td><td class="ds num col-ds">$0.00014</td><td class="opus num col-opus">$0.0000005</td><td class="ds num col-ds">$0.00000014</td></tr>
+        <tr><td>输出</td><td class="opus num col-opus">$0.025</td><td class="ds num col-ds">$0.00219</td><td class="opus num col-opus">$0.000025</td><td class="ds num col-ds">$0.00000219</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>④ 用你的真实日志算账</h2>
+  <p>以截图那轮 <code>in=899, out=77</code>（纯首次输入、无缓存）为例：</p>
+  <div class="card">
+    <table>
+      <thead><tr><th>项</th><th class="opus">Opus 4.8</th><th class="ds">DeepSeek-R 待核</th></tr></thead>
+      <tbody>
+        <tr><td>输入成本</td><td class="opus num col-opus">899 × $5/1M = $0.004495</td><td class="ds num col-ds">899 × $0.55/1M = $0.000494</td></tr>
+        <tr><td>输出成本</td><td class="opus num col-opus">77 × $25/1M = $0.001925</td><td class="ds num col-ds">77 × $2.19/1M = $0.000169</td></tr>
+        <tr><td><strong>本轮合计</strong></td><td class="opus num col-opus"><strong>≈ $0.00642</strong></td><td class="ds num col-ds"><strong>≈ $0.00066</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>同一轮，Opus 4.8 约是 DeepSeek-R 的 <strong>≈ 9.7 倍</strong>成本。</p>
+
+  <h2>⑤ 关键结论</h2>
+  <ul>
+    <li><strong>input_tokens ≠ 发出去的总量</strong>：它只是「按全价算的部分」。真实发出量 = input + cache_write + cache_read。</li>
+    <li><strong>三种输入 token 单价差极大</strong>：cache_read(0.1×) ≪ input(1×) &lt; cache_write(1.25×)。多轮循环命中 cache_read 是省钱核心。</li>
+    <li><strong>最强对最强</strong>：DeepSeek-R 比 Opus 4.8 便宜约一个数量级（输入/输出 ~9–11×，读缓存 ~3.6×）。</li>
+    <li><strong>便宜 ≠ 划算</strong>：要结合任务难度、成功率、循环轮数综合看——贵模型少走几轮、少返工，总成本可能反而低。这是第 18 章「成本控制 / 模型路由」的主题。</li>
+  </ul>
+
+  <div class="foot">
+    数据来源：Anthropic 官方（权威）· DeepSeek 历史参考价（待核实，用值 hit $0.14 / miss $0.55 / output $2.19 per 1M）。
+    源 Markdown：price_comparison.md。本页样式内嵌，双击即可用浏览器打开，自动适配明暗主题。
+  </div>
+
+</div>
+</body>
+</html>

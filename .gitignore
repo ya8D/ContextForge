@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 隐私：代理凭据（ANTHROPIC_AUTH_TOKEN / BASE_URL / MODEL），绝不进库
+.env
+
+# 运行产物 / 调试痕迹
+traces/
+log/
+.pytest_cache/
