@@ -197,3 +197,118 @@ def test_main_agent_spawns_subagent():
 
     # 断言 3：最终有非空答案
     assert isinstance(final, str) and final.strip()
+
+
+# ── T5-A：真实 AI 验证 directive 客制化压缩真的被遵守 ────────────────────
+#
+# 设计（与用户对齐，题材直接对准用户踩过的真实故障）：
+#   用户遇到的坑——AI 每次调工具都带一句重复的「口癖」（如"让我来运行…"），这句口癖
+#   在历史里一轮轮堆积，垃圾文本正反馈，最后 AI 被自己的口癖淹没、无法再调工具。
+#   compact 的真实价值就是把这类**重复过程口癖/噪声**删掉、只留真实进展——本测试正是
+#   验证这一点。
+#
+# 做法：直接 seed 一段受控历史（不靠模型串行攒，脆且多轮 API）：
+#   - 每轮都夹一句**固定重复的口癖** _TIC（= 要删的噪声 B）；
+#   - 夹带真正的进展信息，带独特标记 _PROGRESS（= 要留的 A）。
+#   然后 compact_now(directive=...) 只发一次真实 API 调用（summarizer），断言两个方向：
+#   方向一（保留 A）：directive 说聚焦进展 → 摘要含 _PROGRESS，且真的压缩了（变短）。
+#   方向二（降频 B）：口癖堆积很多次 → directive 要求降频 → 摘要里那句口癖至多剩 1 次。
+#
+# 两个关键设计：
+#   1. 方向二用**"降频/去重"语义**（"重复很多次…至多保留一次"），不用"删除/隐藏/绝不出现"
+#      这种强硬措辞——后者的意图形状像"清理/隐藏记录"，会触发模型安全拒答（T5-A 实操踩过，
+#      见 TODO T5-B）。断言也用**次数对比**（从 ≥6 次降到 ≤1 次），比"绝对为 0"更真实、更稳，
+#      也正好匹配真实故障：口癖是"堆积"成灾，压缩是"降频"而非"抹净"。
+#   2. 断言只查摘要**正文**（标记行之后），不查标记行——因为标记行会把整个 directive 抄进去，
+#      而 directive 里就含口癖原文，若连标记行一起查会污染计数。
+# ⚠️ LLM 非确定性：极小概率模型不完全遵守 → 偶发红；属 e2e、默认不跑，可接受。
+
+_PROGRESS = "PROGRESS_STEP_DBSCHEMA"   # 要保留的真实进展（A）
+# 要降频的重复口癖（B）：用真实故障里那种自然语言口癖（模型每次调工具带的那句话），
+# 而非机械 token——贴合用户遇到的"口癖一轮轮堆积、正反馈淹没 agent"的真实场景。
+_TIC = "让我继续按部就班地把这个任务往前推进"
+
+
+def _seed_history_with_tic() -> list[dict]:
+    """造头 + 6 轮历史：每轮 assistant 都带同一句重复口癖 _TIC；奇数轮夹带真实进展 _PROGRESS。
+
+    6 轮 > 保留最近 3 轮，中段（前 3 轮）会被压——前 3 轮里既有反复的口癖，也有真实进展，
+    正好考验 summarizer 按 directive 取舍：删掉重复口癖、留住进展。纯文本一问一答，结构最简。
+    """
+    msgs: list[dict] = [{"role": "user", "content": "任务：整理这批数据表的字段"}]
+    for i in range(6):
+        # 每轮 assistant 都以同一句口癖开头（模拟"每次调工具都带的那句话"堆积）。
+        assistant_line = f"{_TIC}。第{i}步处理中。"
+        if i % 2 == 1:
+            assistant_line += f"（进展：完成了 {_PROGRESS} 的整理。）"
+        msgs.append({"role": "assistant", "content": assistant_line})
+        msgs.append({"role": "user", "content": f"第{i}步收到，继续。"})
+    return msgs
+
+
+def _extract_summary_body(messages: list[dict]) -> str:
+    """取出「前情摘要」消息的**正文**（去掉第一行标记，因标记会抄入整个 directive）。"""
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, str) and content.startswith("[前情摘要"):
+            # 标记在第一行，正文从第二行起——只对正文做断言，不受标记里 directive 文本干扰。
+            parts = content.split("\n", 1)
+            return parts[1] if len(parts) > 1 else ""
+    return ""
+
+
+@pytest.mark.e2e
+def test_compact_directive_keeps_requested_content():
+    """方向一（保留 A）：directive 说聚焦真实进展 → 摘要正文含进展标记，且真的压缩了。"""
+    agent = Agent()
+    agent.messages = _seed_history_with_tic()
+    before_len = len(agent.messages)
+
+    result = agent.compact_now(
+        directive=f"摘要请聚焦真实的处理进展（如 {_PROGRESS} 这类完成项），完整保留。"
+    )
+
+    # 断言 1：确实压缩了（消息变短 + 返回"已压缩"）
+    assert "已压缩" in result
+    assert len(agent.messages) < before_len
+
+    # 断言 2：directive 点名要留的进展标记，真的出现在摘要正文里
+    body = _extract_summary_body(agent.messages)
+    assert body, "没找到『前情摘要』正文 —— 压缩没按预期重写历史"
+    assert _PROGRESS in body, (
+        f"摘要正文里没有 {_PROGRESS} —— 真实 AI 没有遵守『保留进展』指令。正文：\n{body}"
+    )
+
+
+@pytest.mark.e2e
+def test_compact_directive_drops_repeated_tic():
+    """方向二（降频 B）：口癖在历史里堆积很多次 → directive 要求降频 → 摘要里至多剩 1 次。
+
+    这正是用户踩过的坑的正解：同一句口癖一轮轮堆积成正反馈（真实故障里 AI 被自己的口癖
+    淹没、无法再调工具），compact 的价值就是把 N 次降到 1 次以下。用"降频/去重"语义而非
+    "删除/隐藏"，既贴合真实场景，又不触发模型安全拒答（T5-A 实操踩过，见 TODO T5-B）。
+    """
+    agent = Agent()
+    agent.messages = _seed_history_with_tic()
+    # 原始历史里口癖出现了多少次（6 轮每轮一次，≥6）——这就是"堆积"。
+    before_count = sum(
+        str(m.get("content", "")).count(_TIC) for m in agent.messages
+    )
+
+    agent.compact_now(
+        directive=(
+            f"历史里这句口头禅「{_TIC}」重复出现了很多次，是无信息的过程噪声。"
+            f"压缩后这句话最多只保留一次，其余重复的都去掉，摘要聚焦真实进展。"
+        )
+    )
+
+    # 断言：口癖从"堆积很多次"降到"至多 1 次"，且确实比原来少（真的降频了）。
+    body = _extract_summary_body(agent.messages)
+    assert body, "没找到『前情摘要』正文 —— 压缩没按预期重写历史"
+    after_count = body.count(_TIC)
+    assert before_count >= 6, f"seed 历史口癖没堆够（{before_count} 次），测试前提不成立"
+    assert after_count <= 1, (
+        f"口癖降频失败：摘要正文里仍有 {after_count} 次「{_TIC}」（原 {before_count} 次）。"
+        f"真实 AI 没把堆积的口癖压下去。正文：\n{body}"
+    )
+    assert after_count < before_count, "口癖次数没减少 —— 压缩没起到去重降频作用"
