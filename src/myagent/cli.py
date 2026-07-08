@@ -23,6 +23,7 @@ def main() -> int:
     agent = Agent()
     print("=" * 56)
     print("  myagent CLI —— 输入任务开始；exit/quit 退出；reset 清空记忆")
+    print("  /compact [要求] —— 手动压缩历史（可跟一段话指定保留/删除什么）")
     print(f"  模型：{agent.model}")
     print(f"  可用工具（发给模型的菜单，共 {len(TOOL_SCHEMAS)} 个）：")
     for t in TOOL_SCHEMAS:
@@ -44,6 +45,11 @@ def main() -> int:
         if task.lower() == "reset":
             agent = Agent()
             print("（已清空记忆，开启新会话）")
+            continue
+        # T5-A 主动压缩：/compact [要求]。空要求 = 无特别要求（回退会话级偏好/默认四维）。
+        if task.lower() == "/compact" or task.lower().startswith("/compact "):
+            directive = task[len("/compact"):].strip() or None
+            print(agent.compact_now(directive=directive))
             continue
 
         final = agent.run(task)

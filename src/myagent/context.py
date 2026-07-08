@@ -132,10 +132,28 @@ _SUMMARY_PROMPT = (
 )
 
 
+def _build_summary_prompt(directive: str | None) -> str:
+    """按有无 directive 拼出摘要 prompt（T5-A 客制化）。
+
+    directive 为空 → 逐字返回 _SUMMARY_PROMPT（向后兼容，与 P3 完全一致）。
+    directive 有值 → 把用户要求作为「优先遵守的特别要求」插在四维基础要求之前，
+    **叠加而非替换**：四维是底线（任务目标/已做/发现/下一步不能丢），用户要求在其上加码
+    （比如"重点保留登录相关报错、其余狠删"）。
+    """
+    if not directive:
+        return _SUMMARY_PROMPT
+    return (
+        f"⚠️ 本次压缩有用户指定的特别要求，请**优先遵守**：{directive}\n"
+        f"在满足上述要求的前提下，仍需保留下面的基础信息。\n\n"
+        + _SUMMARY_PROMPT
+    )
+
+
 def compact_messages(
     messages: list[dict],
     summarizer,
     keep_recent_turns: int = KEEP_RECENT_TURNS,
+    directive: str | None = None,
 ) -> tuple[list[dict], dict] | tuple[list[dict], None]:
     """把过长的 messages 压缩：保头（原始任务）+ 压中段（LLM 摘要）+ 保尾（最近几轮原文）。
 
@@ -148,6 +166,10 @@ def compact_messages(
       summarizer        : 一个可调用对象 summarizer(text)->str，负责调 LLM 生成摘要。
                           通过参数注入，测试时可传假回调，不烧钱、不依赖网络。
       keep_recent_turns : 末尾保留几轮原文。
+      directive         : T5-A 客制化——用户对本次压缩的自然语言要求（"保什么删什么"）。
+                          None（默认）时 prompt 与 P3 逐字相同（向后兼容）；有值时把它作为
+                          **优先遵守的特别要求**叠加在四维基础要求之上（叠加而非替换，避免
+                          用户一句话就把"保留任务目标"这种底线也丢了）。
 
     返回：(新的 messages 列表, 压缩统计 dict)。
       若历史太短、不够压（切不出中段），返回 (原 messages, None) 表示没压。
@@ -180,13 +202,17 @@ def compact_messages(
         return messages, None
 
     middle_text = _render_middle_for_summary(middle_messages)
-    summary = summarizer(_SUMMARY_PROMPT + middle_text)
+    prompt = _build_summary_prompt(directive) + middle_text
+    summary = summarizer(prompt)
 
     # 组装压缩后的历史：头 + 一条摘要消息 + 最近几轮原文。
     # 摘要用 user 角色注入（当作"系统给 agent 的前情提要"），加醒目标记便于识别。
+    # 带上 directive 便于回看 trace 时知道这次压缩是带着什么目的做的。
+    marker = "[前情摘要 · 由 context.py 压缩生成"
+    marker += f"，按要求：{directive}]" if directive else "]"
     summary_msg = {
         "role": "user",
-        "content": f"[前情摘要 · 由 context.py 压缩生成]\n{summary}",
+        "content": f"{marker}\n{summary}",
     }
     recent_messages = [m for turn in recent_turns for m in turn]
     new_messages = [head, summary_msg, *recent_messages]

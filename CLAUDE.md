@@ -44,6 +44,9 @@
 - **可编辑安装**（T2 起）：`py -m pip install -e .` 后，**任意目录**敲 `myagent` 即可启动交互
   CLI（`pyproject.toml` 声明的 console_scripts 入口）。`-e` 可编辑模式：改代码立即生效，
   无需重装。
+- **CLI 交互命令**：`exit`/`quit`/`q` 退出；`reset` 清空记忆开新会话；
+  `/compact [要求]` 手动压缩历史（T5-A）——可跟一段话指定保留/删除什么
+  （如 `/compact 只保留登录相关报错，其余删掉`），不跟则按默认/会话级偏好压。
 - 运行 `tests/` 下的手动演示脚本：`py tests/<脚本名>.py`（脚本内部已把 `src/` 插入
   `sys.path`，可直接跑，无需切目录）。
 - 冒烟测试（验证 API 通路）：`py tests/00_smoke_test.py`

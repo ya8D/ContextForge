@@ -111,7 +111,9 @@ class Agent:
     def __init__(self, model: str | None = None, max_iterations: int = 100,
                  compact_threshold: int = COMPACT_THRESHOLD_TOKENS,
                  check_command: str | None = None,
-                 tools: list | None = None):
+                 tools: list | None = None,
+                 compact_directive: str | None = None,
+                 compact_executor: str = "self"):
         # 模型 ID 从环境读，不写死（见 CLAUDE.md）。
         self.model = model or os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8[1m]")
         # SDK 自动读取 ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL。
@@ -124,6 +126,12 @@ class Agent:
         # 可用工具集（P5 上下文隔离用）。默认 None = 用全局全集 TOOL_SCHEMAS（主 agent）。
         # 子 agent 会被传入一个**受限子集**（不含 spawn_subagent），防止无限递归派生。
         self.tool_schemas = tools if tools is not None else TOOL_SCHEMAS
+        # ── T5-A 客制化 compact ──
+        # 会话级压缩偏好：被动压缩（到阈值自动触发）默认带上它。None = 走 P3 默认四维。
+        self.compact_directive = compact_directive
+        # 压缩执行者："self"（默认，_summarize 盲总结，与 P3 一致）或 "subagent"
+        # （派带工具的子 agent 去压，能回读文件核实）。
+        self.compact_executor = compact_executor
         # ── Harness 约束（P4，对照第 8 章三根柱子）──
         # ② 死循环检测：连续 3 次相同 action 就判定鬼打墙、注入换思路提示。
         self.loop_detector = LoopDetector(max_same=3)
@@ -337,19 +345,66 @@ class Agent:
         from myagent.tools import run_command
         return run_command(command)
 
+    def _summarize_via_subagent(self, prompt: str) -> str:
+        """T5-A 执行者「subagent」：派一个带工具的子 agent 去做压缩摘要。
+
+        与 _summarize（盲总结一次）的区别：子 agent 有独立上下文 + 受限工具集
+        （read/run/write），能**回读原始文件核实**某个结论是否还成立，而非凭记忆总结。
+        这就是「压缩执行者可切换成子 agent」的增量价值（复用 P5 sub-agent 机制）。
+        子 agent 的中间过程留在它自己的 messages 里，只回传最终摘要。
+        """
+        sub = Agent(
+            tools=subagent_tool_schemas(),
+            max_iterations=15,
+        )
+        task = (
+            "你是一个上下文压缩助手。下面给你一段 agent 的中间对话历史和压缩要求。"
+            "请产出符合要求的『前情摘要』。如果历史里提到某个文件/命令的结论，你可以用"
+            "read_file / run_command **回读核实**它现在是否还成立，再据实写进摘要。"
+            "只输出摘要正文。\n\n" + prompt
+        )
+        return sub.run(task)
+
+    def _pick_summarizer(self):
+        """按 self.compact_executor 选压缩执行者回调（self=盲总结 / subagent=带工具核实）。"""
+        return self._summarize_via_subagent if self.compact_executor == "subagent" else self._summarize
+
+    def compact_now(self, directive: str | None = None) -> str:
+        """主动压缩入口（供 CLI 的 /compact 调用）：用户说压就压，不看 usage 阈值。
+
+        directive：用户当场输入的压缩要求；None 时回退到会话级 self.compact_directive。
+        返回一句人类可读的结果行。够轮数才压，不够则如实说未压。
+        """
+        directive = directive or self.compact_directive
+        new_messages, stats = compact_messages(
+            self.messages, summarizer=self._pick_summarizer(), directive=directive,
+        )
+        if stats is None:
+            return "轮数不足以压缩（中段为空），本次未压缩。"
+        self.messages = new_messages
+        note = f"（按要求：{directive}）" if directive else ""
+        return (f"已压缩{note}：消息 {stats['before_msgs']}→{stats['after_msgs']} 条，"
+                f"压掉 {stats['compacted_turns']} 轮，保留最近 {stats['kept_recent_turns']} 轮，"
+                f"摘要 {stats['summary_chars']} 字符。")
+
     def _maybe_compact(self, usage: dict) -> None:
         """用本轮真实 usage 判断上下文规模，超阈值就压缩 self.messages。
 
         压缩把中段历史换成一条摘要，self.messages 原地替换成更短的列表；
         下一轮 Think 发出去的就是压缩后的历史。API 无状态，只认我们发的 messages，
         它不知道发生过压缩——控制权全在我们本地。
+
+        T5-A：被动压缩带上会话级偏好 self.compact_directive、按 self.compact_executor 选执行者。
         """
         tokens = current_context_tokens(usage)
         if not should_compact(usage, threshold=self.compact_threshold):
             return  # 没超阈值，不动。
 
         _log("\n🗜️  [压缩]", f"上下文规模 {tokens} token 超阈值，开始压缩中段历史…")
-        new_messages, stats = compact_messages(self.messages, summarizer=self._summarize)
+        new_messages, stats = compact_messages(
+            self.messages, summarizer=self._pick_summarizer(),
+            directive=self.compact_directive,
+        )
         if stats is None:
             # 规模超了但轮数还不够压（切不出中段）——如实说明，不假装压了。
             _log("🗜️  [压缩]", "轮数不足以压缩（中段为空），本轮跳过。")

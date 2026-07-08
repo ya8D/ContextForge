@@ -164,3 +164,49 @@ def test_summarizer_receives_middle_content():
     # 中段是第 0、1 轮，prompt 里应能看到 read_file 和被读的文件名
     assert "read_file" in captured["prompt"]
     assert "f0.txt" in captured["prompt"] or "文件0" in captured["prompt"]
+
+
+# ── T5-A：directive 客制化压缩偏好（向后兼容 + 叠加注入）──
+
+def test_directive_none_prompt_identical_to_p3():
+    """directive=None 时，传给 summarizer 的 prompt 与 P3 逐字相同（向后兼容钉死）。"""
+    from myagent.context import _SUMMARY_PROMPT
+
+    captured = {}
+
+    def capturing(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return "摘要"
+
+    msgs = _build_history(5)
+    compact_messages(msgs, capturing, keep_recent_turns=3, directive=None)
+    # prompt = _SUMMARY_PROMPT + 中段渲染文本；开头必须逐字是 _SUMMARY_PROMPT
+    assert captured["prompt"].startswith(_SUMMARY_PROMPT)
+
+
+def test_directive_injected_into_prompt_and_keeps_base():
+    """directive 有值时：该串出现在 prompt 里，且四维基础要求仍在（叠加不替换）。"""
+    captured = {}
+
+    def capturing(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return "摘要"
+
+    msgs = _build_history(5)
+    compact_messages(msgs, capturing, keep_recent_turns=3,
+                     directive="重点保留登录相关报错")
+    # 用户要求进了 prompt
+    assert "重点保留登录相关报错" in captured["prompt"]
+    # 四维基础要求（底线）仍在，没被替换掉
+    assert "任务目标是什么" in captured["prompt"]
+    assert "下一步要往哪走" in captured["prompt"]
+
+
+def test_directive_recorded_in_summary_marker():
+    """directive 会写进摘要消息的标记，便于回看 trace 时知道这次压缩的目的。"""
+    msgs = _build_history(5)
+    new_msgs, _ = compact_messages(msgs, _fake_summarizer, keep_recent_turns=3,
+                                   directive="只保留数据库 schema")
+    summary_msg = new_msgs[1]  # 头之后第一条就是摘要
+    assert "前情摘要" in summary_msg["content"]
+    assert "只保留数据库 schema" in summary_msg["content"]

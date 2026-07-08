@@ -14,6 +14,7 @@
 - [x] **T3 标准包 src 布局**
 - [x] **T2 快速启动（console_scripts 入口，`myagent` 命令）**
 - [x] **T1 log 开关（MYAGENT_LOG 分级 + MYAGENT_TRACE 独立开关）**
+- [x] **T5-A 客制化 compact（压缩偏好可注入 + 压缩执行者可切换 + /compact 主动压缩）**
 - [ ] P6（可选）结构化输出 & 跨会话 Memory
 
 ## P2 明细
@@ -277,6 +278,41 @@
 - **文档同步**：`CLAUDE.md` 新增"## 日志开关"小节，讲清两个变量的取值/默认/作用，以及本地
   设置的两种方式（临时前缀 vs 写进 `.env` 持久生效）；`TODO.md` T1 段落标记完成，执行顺序
   更新为 T5-A → (T4 + T5-B)。
+
+## T5-A 明细（客制化 compact · 压缩偏好可注入 + 执行者可切换 + 主动/被动分流）
+
+- **动机**：P3 的压缩是"哑"的——`_SUMMARY_PROMPT` 写死四维（目标/已做/发现/下一步），
+  `_summarize` 盲总结一次、无工具、无法核实。用户想让压缩带上"当前目的"（保什么、删什么）。
+- **设计取舍（与用户确认）**：
+  - ① 压缩偏好做成一段自然语言，②裁剪策略（删什么）合进这段话，不单拆成结构化配置。
+  - ③ 压缩执行者可切换：默认盲总结，可切成"带工具的子 agent"。
+  - **主动 / 被动分流**（用户明确要求）：被动压缩（到阈值自动触发）读会话级预设偏好；
+    主动压缩（CLI `/compact <要求>`）用用户当场输入的话，None 时回退到会话级偏好。
+- **注入点只有一个**（`context.py`）：`compact_messages` 加 `directive` 参数，经
+  `_build_summary_prompt(directive)` 拼 prompt。**directive 为空时逐字等于 P3 的
+  `_SUMMARY_PROMPT`（向后兼容钉死）**；有值时把用户要求作为"优先遵守的特别要求"**叠加**在
+  四维之上（叠加而非替换——防止用户一句话把"保留任务目标"这种底线也丢了）。摘要消息的标记
+  里也附上 directive，回看 trace 时知道这次压缩的目的。
+- **`agent.py`**：
+  - `Agent.__init__` 加 `compact_directive`（会话级偏好）和 `compact_executor`（"self"/"subagent"）。
+  - `_summarize_via_subagent(prompt)`：③ 的执行者——new 一个受限子 agent（复用
+    `subagent_tool_schemas()` + max_iterations=15，同 spawn_subagent 构造），把"读懂历史 +
+    按要求产出摘要，可用 read_file/run_command 回读核实"作为子任务，返回其最终结论。
+  - `_pick_summarizer()`：按 `compact_executor` 选回调；`_maybe_compact`（被动）和
+    `compact_now`（主动）都走它。
+  - `compact_now(directive=None)`：主动压缩入口，不看 usage 阈值（用户说压就压），
+    够轮数就压、返回人类可读结果行；不够则如实说未压。
+- **`cli.py`**：输入循环加 `/compact [要求]` 解析（与 reset/exit 同层），banner 补一行帮助。
+- **测试**：`test_context.py` +3（directive=None 逐字兼容、directive 注入且四维仍在、
+  标记记录 directive）；`test_agent_logic.py` +5（偏好/执行者默认值、_pick_summarizer 切换、
+  compact_now 轮数不足/够轮数透传 directive/回退会话级偏好——全用 monkeypatch 假回调不烧钱）。
+- **验证**：① `py -m pytest -m "not e2e"` 70 绿（62+8，无回归）；② 手动跑 `myagent`：4 步任务
+  攒 10 条历史 → `/compact 只保留每个命令输出…` → `已压缩（按要求：…）：消息 10→7 条`；
+  ③ **③ 子 agent 执行者手动实证**：构造 `Agent(compact_executor="subagent")`，历史里提到一个
+  探针文件 → `compact_now` → 子 agent **真的启动了自己的 TAOR 循环、真的 read_file 回读核实**，
+  摘要里写"（已回读 …核实，当前仍成立）"——这正是子 agent 相对盲总结的增量价值（能核实，非凭记忆）。
+- **向后兼容**：不传任何 T5-A 参数时，`compact_directive=None` + `compact_executor="self"`，
+  prompt 逐字等于 P3、执行者就是原 `_summarize`，行为与 P3 完全一致。
 
 ## P0 明细
 
