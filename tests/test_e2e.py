@@ -312,3 +312,54 @@ def test_compact_directive_drops_repeated_tic():
         f"真实 AI 没把堆积的口癖压下去。正文：\n{body}"
     )
     assert after_count < before_count, "口癖次数没减少 —— 压缩没起到去重降频作用"
+
+
+# ── T5-A：真实 AI 验证 subagent 执行者「真的回读文件核实」而非盲总结 ──────────
+#
+# 核心手法——制造「历史说的」和「文件真实的」之间的**分歧**：
+#   - 在真实文件里写一个当前值（CURRENT）。
+#   - seed 历史里故意说成一个**过期的旧值**（STALE，和 CURRENT 不同）。
+#   - directive 让压缩时回读文件核实这个值。
+# 然后断言摘要里出现 CURRENT（真实值）——盲总结（_summarize）只有历史里的 STALE 可抄、
+# 绝不可能写出 CURRENT，所以 CURRENT 一旦出现，就铁证子 agent 真的 read_file 核实了。
+# （不断言 STALE 缺席：子 agent 为说明"值已更新"提一嘴旧值是合理表述，见下方断言注释。）
+# ⚠️ 慢（子 agent 跑多轮 TAOR）+ 真调 API；用户已确认这条不在意 token。
+
+_PROBE_CURRENT = "CURRENT_VALUE_9911"   # 文件里真实的当前值
+_PROBE_STALE = "STALE_VALUE_1234"       # 历史里过期的旧值（故意与当前不符）
+
+
+@pytest.mark.e2e
+def test_subagent_executor_reverifies_by_reading_file(tmp_path):
+    """subagent 执行者会真的 read_file 核实：摘要写的是文件真实值，而非历史里的过期值。"""
+    probe = tmp_path / "probe.txt"
+    probe.write_text(f"探针文件当前内容：{_PROBE_CURRENT}", encoding="utf-8")
+
+    agent = Agent(compact_executor="subagent")
+    # seed 头 + 6 轮历史：反复"声称"探针值是 STALE（过期），并给出文件路径供核实。
+    agent.messages = [{"role": "user", "content": f"任务：核对探针文件 {probe}"}]
+    for i in range(6):
+        agent.messages.append({
+            "role": "assistant",
+            "content": f"第{i}步：（历史记录，可能已过期）探针文件 {probe} 的值是 {_PROBE_STALE}。",
+        })
+        agent.messages.append({"role": "user", "content": f"第{i}步收到。"})
+
+    result = agent.compact_now(
+        directive=(
+            f"历史里说探针文件 {probe} 的值是 {_PROBE_STALE}，但这可能已过期。"
+            f"请用 read_file 回读该文件，把**文件当前真实的值**写进摘要。"
+        )
+    )
+
+    assert "已压缩" in result
+    body = _extract_summary_body(agent.messages)
+    assert body, "没找到『前情摘要』正文 —— 压缩没按预期重写历史"
+    # 关键断言：摘要含文件真实值 CURRENT —— 盲总结只有历史里的 STALE 可抄、绝不可能写出
+    # CURRENT，所以 CURRENT 一旦出现，就铁证子 agent 真的 read_file 回读核实了。
+    # 不断言 STALE 缺席：子 agent 为说明"值已更新"而提一嘴旧值（"STALE 已过期，现为 CURRENT"）
+    # 是完全合理甚至更好的表述，苛求旧值一个字不出现反而是错的判据。
+    assert _PROBE_CURRENT in body, (
+        f"摘要里没有文件真实值 {_PROBE_CURRENT} —— 子 agent 没有回读核实（盲总结只会照抄"
+        f"历史里的过期值 {_PROBE_STALE}）。正文：\n{body}"
+    )

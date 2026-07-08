@@ -119,16 +119,58 @@ def test_dump_turn_skips_when_trace_off(monkeypatch, tmp_path):
     assert not (tmp_path / "turn_01.json").exists()
 
 
+def test_dump_turn_records_response_content(monkeypatch, tmp_path):
+    """trace 补记模型输出：本轮回复内容真的进了 turn_NN.json 的 response_content 字段。
+
+    用假 content block（仿 SDK 的 TextBlock，有 model_dump()）模拟 response.content，
+    不调 API。验证的正是用户发现缺失的东西：一轮 end_turn 结束时，回复文字也能落盘复盘。
+    """
+    import json
+
+    class FakeBlock:
+        def model_dump(self):
+            return {"type": "text", "text": "模型回复XYZ"}
+
+    monkeypatch.delenv("MYAGENT_TRACE", raising=False)  # 默认 on
+    agent = Agent()
+    agent.current_task_dir = tmp_path
+    agent._dump_turn(1, [{"role": "user", "content": "问题"}],
+                     {"input_tokens": 1}, "end_turn", [FakeBlock()])
+
+    data = json.loads((tmp_path / "turn_01.json").read_text(encoding="utf-8"))
+    assert "response_content" in data
+    assert data["response_content"] == [{"type": "text", "text": "模型回复XYZ"}]
+
+
 # ── T5-A：客制化 compact（会话级偏好 + 执行者切换 + compact_now）────────
 
-def test_agent_stores_compact_directive_and_executor_defaults():
-    """会话级偏好存住；执行者默认 self、可设 subagent。"""
+def test_agent_stores_compact_directive_and_executor_defaults(monkeypatch):
+    """会话级偏好存住；执行者默认 self、可设 subagent。
+
+    显式 delenv 保证不受 .env / 环境里 MYAGENT_COMPACT_DIRECTIVE 干扰（该变量是新增的
+    环境兜底来源，见 test_compact_directive_reads_env_fallback）。
+    """
+    monkeypatch.delenv("MYAGENT_COMPACT_DIRECTIVE", raising=False)
     a = Agent()
     assert a.compact_directive is None
     assert a.compact_executor == "self"
     b = Agent(compact_directive="保留登录报错", compact_executor="subagent")
     assert b.compact_directive == "保留登录报错"
     assert b.compact_executor == "subagent"
+
+
+def test_compact_directive_reads_env_fallback(monkeypatch):
+    """会话级偏好可从环境变量 MYAGENT_COMPACT_DIRECTIVE 兜底（写 .env 持久生效）。"""
+    monkeypatch.setenv("MYAGENT_COMPACT_DIRECTIVE", "环境里设的压缩偏好")
+    a = Agent()  # 不显式传参
+    assert a.compact_directive == "环境里设的压缩偏好"
+
+
+def test_explicit_compact_directive_overrides_env(monkeypatch):
+    """显式传参优先级高于环境变量（同 self.model 读 ANTHROPIC_MODEL 的兜底语义）。"""
+    monkeypatch.setenv("MYAGENT_COMPACT_DIRECTIVE", "环境偏好")
+    a = Agent(compact_directive="显式偏好")
+    assert a.compact_directive == "显式偏好"
 
 
 def test_pick_summarizer_switches_by_executor():

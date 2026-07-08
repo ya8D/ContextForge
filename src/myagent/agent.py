@@ -127,8 +127,10 @@ class Agent:
         # 子 agent 会被传入一个**受限子集**（不含 spawn_subagent），防止无限递归派生。
         self.tool_schemas = tools if tools is not None else TOOL_SCHEMAS
         # ── T5-A 客制化 compact ──
-        # 会话级压缩偏好：被动压缩（到阈值自动触发）默认带上它。None = 走 P3 默认四维。
-        self.compact_directive = compact_directive
+        # 会话级压缩偏好：被动压缩（到阈值自动触发）默认带上它。
+        # 优先级：显式传参 > 环境变量 MYAGENT_COMPACT_DIRECTIVE（写 .env 持久生效）> None（默认四维）。
+        # 与 self.model 读 ANTHROPIC_MODEL 同款兜底思路，无需给 CLI 加新命令。
+        self.compact_directive = compact_directive or os.environ.get("MYAGENT_COMPACT_DIRECTIVE") or None
         # 压缩执行者："self"（默认，_summarize 盲总结，与 P3 一致）或 "subagent"
         # （派带工具的子 agent 去压，能回读文件核实）。
         self.compact_executor = compact_executor
@@ -186,8 +188,8 @@ class Agent:
                 "cache_read_input_tokens": getattr(u, "cache_read_input_tokens", None),          # 从缓存读（≈0.1 价）
             }
 
-            # 落盘：这一轮的完整 in（messages_sent）+ out 摘要（usage/stop_reason）。
-            self._dump_turn(i, messages_sent, usage, response.stop_reason)
+            # 落盘：这一轮的完整 in（messages_sent）+ 本轮模型输出（response.content）+ usage。
+            self._dump_turn(i, messages_sent, usage, response.stop_reason, response.content)
 
             # 打印一行缓存对比汇总，一眼看清「input 只是新增量，其余命中缓存」。
             cr = usage["cache_read_input_tokens"]
@@ -305,8 +307,16 @@ class Agent:
         _log("\n⛔ [护栏]", f"达到最大轮数 {self.max_iterations}，强制停止。", level="error")
         return "[未完成] 达到最大迭代轮数。"
 
-    def _dump_turn(self, turn: int, messages_sent, usage, stop_reason) -> None:
-        """把这一轮的完整 in/out 落盘成一个 JSON 文件，供实地调查。"""
+    def _dump_turn(self, turn: int, messages_sent, usage, stop_reason,
+                   response_content=None) -> None:
+        """把这一轮的完整 in/out 落盘成一个 JSON 文件，供实地调查。
+
+        response_content：本轮模型的输出（response.content，SDK content block 列表）。
+        为什么要它：messages_sent 是"调 LLM 之前"的快照，只含发出去的输入；模型回复要到
+        下一轮才作为历史出现，若本轮 end_turn 就结束则任何 trace 都不落其文字内容（只有
+        usage.output_tokens 这个量化值）。把 response_content 单独存进来，trace 才能完整
+        复盘"模型这轮说了什么"。默认 None 向后兼容。
+        """
         if not _trace_enabled():
             return  # MYAGENT_TRACE=off：不落盘（屏幕日志仍受 MYAGENT_LOG 独立控制）。
         # 写进当前任务的子目录，turn 是「本任务内」的轮次，跨任务不会撞名。
@@ -316,7 +326,8 @@ class Agent:
             "model": self.model,
             "stop_reason": stop_reason,
             "usage": usage,
-            "messages_sent": messages_sent,  # 这一轮实际发给 API 的完整历史
+            "messages_sent": messages_sent,          # 这一轮实际发给 API 的完整历史（输入侧）
+            "response_content": _to_serializable(response_content),  # 本轮模型输出（输出侧）
         }
         path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
