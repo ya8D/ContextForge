@@ -8,8 +8,8 @@ test_subagent.py —— P5 Sub-agent 的纯逻辑测试（不调 API，不烧钱
 跑法：py -m pytest tests/test_subagent.py -v （属于 "not e2e" 那批）
 """
 
-from agent import Agent
-from tools import TOOL_SCHEMAS, subagent_tool_schemas
+from myagent.agent import Agent
+from myagent.tools import TOOL_SCHEMAS, subagent_tool_schemas
 
 
 def test_importing_agent_registers_spawn_subagent():

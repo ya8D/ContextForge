@@ -19,11 +19,33 @@
   - `ANTHROPIC_BASE_URL`（本地代理地址）
   - `ANTHROPIC_MODEL`（如 `claude-opus-4-8[1m]`）
 
+## 日志开关（T1）
+
+两个独立的环境变量，互不影响：
+
+| 变量 | 取值 | 默认 | 作用 |
+|---|---|---|---|
+| `MYAGENT_LOG` | `off` / `normal` / `debug` | `normal` | 控**屏幕**输出：`off` 只出最终答案 + 权限拦截/死循环/验证门/护栏这类错误；`normal` 是现在的样子（TAOR 每轮 Think/Act/Observe）；`debug` 再加逐轮上下文规模等细节。 |
+| `MYAGENT_TRACE` | `on` / `off` | `on` | 独立控 `traces/` 落盘。可以「屏幕安静但文件还留着」，反之亦可。 |
+
+本地怎么设置：
+- **临时单次**（当前终端是 git-bash，前缀语法直接可用）：
+  ```bash
+  MYAGENT_LOG=debug myagent
+  MYAGENT_LOG=off MYAGENT_TRACE=off myagent
+  ```
+- **持久默认**：写进 `myagent/.env`（已 gitignore，`load_dotenv` 自动加载）一行，比如
+  `MYAGENT_LOG=debug`，之后每次敲 `myagent` 都生效，无需再加前缀。
+
 ## 运行方式
 
 - Python：**系统 Python 3.11**，用 `py` 启动器调用（bash 里 `python` / `python3` 不通）。
 - 不建虚拟环境，依赖装在全局。安装：`py -m pip install -r requirements.txt`
-- 运行任意脚本：`py <脚本名>.py`
+- **可编辑安装**（T2 起）：`py -m pip install -e .` 后，**任意目录**敲 `myagent` 即可启动交互
+  CLI（`pyproject.toml` 声明的 console_scripts 入口）。`-e` 可编辑模式：改代码立即生效，
+  无需重装。
+- 运行 `tests/` 下的手动演示脚本：`py tests/<脚本名>.py`（脚本内部已把 `src/` 插入
+  `sys.path`，可直接跑，无需切目录）。
 - 冒烟测试（验证 API 通路）：`py tests/00_smoke_test.py`
 - **自动化测试**：`py -m pytest -m "not e2e"`（纯逻辑，不烧钱）；`py -m pytest -m e2e`（真调 API）。
 - 中文输出：跑脚本时加 `PYTHONUTF8=1`，避免终端 GBK 乱码。
@@ -32,16 +54,22 @@
 
 ```
 myagent/
+  pyproject.toml         # console_scripts 入口（myagent = myagent.cli:main）+ src 布局声明
   requirements.txt      # anthropic + tiktoken
+  pytest.ini            # pythonpath = src，让 tests/ 能 import src/myagent 包
+  src/
+    myagent/
+      __init__.py       # 包标记
+      agent.py          # 核心 TAOR loop（后续阶段逐步长大）
+      tools.py          # 工具注册表 + 内置工具（含 P5 spawn_subagent 派生子 agent）
+      context.py        # 上下文/压缩（P3：真实 usage 判规模，超阈值压中段）
+      harness.py        # 权限拦截 + 死循环检测 + 验证门（P4：三根柱子）
+      cli.py             # CLI 入口（原 main.py，T3 标准包布局后改名）
   tests/
     00_smoke_test.py    # 最小 API 调用验证
-  agent.py              # 核心 TAOR loop（后续阶段逐步长大）
-  tools.py              # 工具注册表 + 内置工具（含 P5 spawn_subagent 派生子 agent）
-  context.py            # 上下文/压缩（P3：真实 usage 判规模，超阈值压中段）
-  harness.py            # 权限拦截 + 死循环检测 + 验证门（P4：三根柱子）
-  main.py               # CLI 入口
 ```
-（除 requirements/smoke 外，其余文件随对应 Phase 逐步创建。）
+（除 requirements/smoke 外，其余文件随对应 Phase 逐步创建。T3 起源码收进
+`src/myagent/`，标准 Python 包布局；T2 起 `pip install -e .` 后任意目录可直接敲 `myagent` 启动。）
 
 ## 编码风格
 

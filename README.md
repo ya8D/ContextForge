@@ -29,11 +29,13 @@
 ## 目录
 
 ```
-agent.py       # 核心 TAOR 循环 + spawn_subagent
-tools.py       # 工具注册表（@tool 装饰器）+ read_file / run_command / write_file
-context.py     # 上下文压缩（P3）
-harness.py     # 权限拦截 + 死循环检测 + 验证门（P4）
-main.py        # 交互式 CLI 入口
+pyproject.toml # console_scripts 入口（myagent 命令）+ src 布局声明
+src/myagent/
+  agent.py     # 核心 TAOR 循环 + spawn_subagent
+  tools.py     # 工具注册表（@tool 装饰器）+ read_file / run_command / write_file
+  context.py   # 上下文压缩（P3）
+  harness.py   # 权限拦截 + 死循环检测 + 验证门（P4）
+  cli.py       # 交互式 CLI 入口（原 main.py，T3 标准包布局后改名）
 tests/         # pytest：纯逻辑（不烧钱）+ 端到端（真调 API，标 @pytest.mark.e2e）
 PROGRESS.md    # 逐阶段的详细开发记录（含每个决策的「为什么」）
 CLAUDE.md      # 项目稳定约定（选型 / 语言 / 运行方式）
@@ -46,8 +48,9 @@ CLAUDE.md      # 项目稳定约定（选型 / 语言 / 运行方式）
 
 ```bash
 py -m pip install -r requirements.txt      # 装依赖（anthropic + pytest 等）
+py -m pip install -e .                      # 可编辑安装，注册 myagent 命令
 
-py main.py                                  # 交互式跑 agent：输入任务 / reset / exit
+myagent                                     # 任意目录敲命令即可交互：输入任务 / reset / exit
 
 py -m pytest -m "not e2e"                   # 跑纯逻辑测试（毫秒级，不烧钱）
 py -m pytest                                # 跑全部（含真调 API 的 e2e）

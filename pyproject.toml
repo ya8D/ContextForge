@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=65"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "myagent"
+version = "0.1.0"
+description = "从零手搓的 agent / harness 学习项目"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40.0",
+    "python-dotenv>=1.0.0",
+    "tiktoken>=0.8.0",
+]
+
+[project.scripts]
+myagent = "myagent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

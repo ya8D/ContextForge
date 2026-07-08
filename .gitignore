@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .venv/
+*.egg-info/
 
 # 隐私：代理凭据（ANTHROPIC_AUTH_TOKEN / BASE_URL / MODEL），绝不进库
 .env

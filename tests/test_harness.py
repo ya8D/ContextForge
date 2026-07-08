@@ -7,8 +7,8 @@ harness.py 三根柱子全是纯逻辑（正则匹配、滑动窗口、判据检
 跑法：py -m pytest tests/test_harness.py -v （属于 "not e2e" 那批）
 """
 
-import harness as h
-from harness import (
+from myagent import harness as h
+from myagent.harness import (
     LoopDetector,
     PermissionLevel,
     ValidationGate,
