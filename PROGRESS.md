@@ -11,6 +11,9 @@
 - [x] **P3 上下文管理（会话内压缩：保头 + 压中段 + 保尾）**
 - [x] **P4 Harness 约束（权限拦截 / 死循环检测 / 验证门）**
 - [x] **P5 Sub-agent（上下文隔离：spawn_subagent 工具）**
+- [x] **T3 标准包 src 布局**
+- [x] **T2 快速启动（console_scripts 入口，`myagent` 命令）**
+- [x] **T1 log 开关（MYAGENT_LOG 分级 + MYAGENT_TRACE 独立开关）**
 - [ ] P6（可选）结构化输出 & 跨会话 Memory
 
 ## P2 明细
@@ -176,6 +179,104 @@
   e2e 派生子 agent 仍绿（重构不改行为）。54 纯逻辑 + e2e 全绿。
 - **收获**：延迟 import 是「能用但治标」，把函数挪到依赖正确的模块才是「根治」——**循环 import 的信号，
   往往是某个东西放错了层**（spawn_subagent 属于 Agent 层，却被放进了工具层）。
+
+## T3 明细（标准包 src 布局）
+
+- **动机**：项目要变成可安装的命令行工具（下一步 T2），需先规范成标准 Python 包布局。
+- **改动**：5 个源文件用 `git mv` 收进 `src/myagent/`（保留重命名历史）：`agent.py` /
+  `tools.py` / `context.py` / `harness.py` 原样搬入；`main.py` 改名为 `cli.py`（T3 要求）。
+  新增 `src/myagent/__init__.py`（仅包标记，无 re-export）。
+- **import 全部改绝对导入**：`from tools import ...` → `from myagent.tools import ...`
+  （不用 `from .tools import ...` 相对导入）。`tools.py`/`context.py`/`harness.py` 本身
+  不含任何内部跨模块 import（P5.1 已确保 tools.py 是纯叶子模块），内容零改动，只是物理换位置；
+  改动全集中在 `agent.py`（3 处导入 + `_run_check` 内的延迟 import）和 `cli.py`（2 处）。
+- **踩到的真陷阱**：`agent.py` 里 `_HERE = Path(__file__).parent` 原本用来定位项目根的
+  `.env` 和 `traces/`（`agent.py` 原在项目根，两者恰好重合）。搬进 `src/myagent/` 后
+  `_HERE` 会变成 `src/myagent/`，`.env`/`traces/` 实际在项目根，路径错位两层——这是纯
+  pytest 测试**测不出来**的 bug（测试不触发真实 API 调用/落盘），得手工排查移动后的路径语义
+  才发现，改成 `_HERE.parent.parent`（上跳两级）修正。这提醒了一件事：结构性搬迁不能只看
+  import 报不报错，还要检查每个"相对本文件路径"的隐含假设是否还成立。
+- **测试文件同步改 import**（7 个）：`test_agent_logic.py` / `test_e2e.py` / `test_context.py` /
+  `test_harness.py` / `test_subagent.py` / `test_tools.py` 加 `myagent.` 前缀；
+  两个手动演示脚本 `01_run_agent.py` / `02_compaction_demo.py` 的 `sys.path.insert` 从指向
+  项目根改成指向 `src/`；`00_smoke_test.py` 不 import 任何内部模块，零改动。
+- **`pytest.ini`**：`pythonpath = .` → `pythonpath = src`，否则 pytest 连采集都做不到。
+- **验证分两层**：① `py -m pytest -m "not e2e" -v` —— 54 绿（与改动前 P5.1 收尾时的
+  53 条 + 本次未变化的条数一致，无回归）；② `cd src && py -c "import myagent, myagent.agent,
+  myagent.tools, myagent.context, myagent.harness, myagent.cli"` —— 包结构自洽、无循环导入。
+  **T3 自身的正式验收项**（免 `PYTHONPATH` 手动设置的裸 `py -c "import myagent"`）**留到
+  T2 完成 `pip install -e .` 后一并验证**——这是 TODO.md 里已明确写好的顺序依赖，不是本次遗漏。
+- **文档同步**：`CLAUDE.md` 目录 + 运行方式改用 `cd src && py -m myagent.cli`；`README.md`
+  目录树和"怎么跑"同步；`TODO.md` 本次不动（等 T2 一起过验收再收尾）。
+
+## T2 明细（快速启动 · console_scripts 入口）
+
+- **动机**：不想每次用路径找 `main.py`；敲个 `myagent` 就进交互，对照 `claude` / `pytest` /
+  `black` 这些命令行工具的同款机制。依赖 T3 已把源码收进标准包结构。
+- **改动**：新增 `pyproject.toml`：
+  - `[project.scripts]` 声明 `myagent = "myagent.cli:main"`（console_scripts 入口）。
+  - `[tool.setuptools.packages.find] where = ["src"]`——显式告诉 setuptools 包在 `src/` 下，
+    否则 src-layout 项目 setuptools 可能找不到包（自动发现默认只看项目根）。
+  - `dependencies` 直接照抄 `requirements.txt` 里的三个核心依赖（anthropic/python-dotenv/
+    tiktoken）；`pytest` 不列入——它是开发期工具，不是包运行时依赖，仍留在 `requirements.txt`
+    给贡献者/学习者装。两份声明目前有点重复，但项目规模小，暂不引入 `[project.optional-dependencies]`
+    这类分层，等依赖真的膨胀了再考虑收敛（不为不存在的问题预先设计）。
+- **`py -m pip install -e .`（可编辑安装）**：把 `myagent` 装进当前 Python 环境，同时注册
+  `myagent` 命令脚本（Windows 上落在 `Scripts\myagent.exe`）。`-e` 让它指回 `src/myagent/`
+  源码而非拷贝一份，改代码立即生效，无需重装。
+- **踩到的小陷阱**：`pip install -e .` 会在 `src/` 下生成 `myagent.egg-info/`（构建元数据，
+  非源码）。补进 `.gitignore`（`*.egg-info/`），避免这个生成物被误提交。
+- **验证**：① `py -c "import myagent"` 在项目根、`/tmp` 等任意目录裸执行都成功——这正是
+  T3 当时明确留到本步骤才能验收的那一条，现在补上了；② `myagent` 命令在任意目录直接敲：
+  banner 正常打印（模型名、4 个工具列表）、`exit` 正常退出、`PYTHONUTF8=1` 下中文不乱码；
+  ③ `py -m pytest -m "not e2e" -q` 仍 54 绿，装包没有引入任何回归。
+- **文档同步**：`CLAUDE.md` 运行方式改成"`pip install -e .` 后任意目录敲 `myagent`"（去掉
+  T3 时写的"过渡期 `cd src && py -m myagent.cli`"说法）；`README.md` 目录树加
+  `pyproject.toml` 一行、"怎么跑"改成 `myagent` 直接跑。
+
+## T1 明细（log 开关 · MYAGENT_LOG 分级 + MYAGENT_TRACE 独立开关）
+
+- **动机**：让用户能开关日志——平时安静，调试时详细；且屏幕输出和 `traces/` 落盘要能分开控制
+  （可以「屏幕安静但文件还留着」）。
+- **设计取舍**：`MYAGENT_LOG` 用字符串枚举 `off/normal/debug`，不用数字档位
+  （如 `MYAGENT_LOG_LEVEL=0/1/2`）——用户提议数字档位，讨论后定字符串：项目风格是
+  "宁可啰嗦、追求可读"（CLAUDE.md 硬约定），字符串比数字自解释，也和已有的
+  `MYAGENT_TRACE=on/off`（同样字符串）保持统一。
+- **改动前先做了一次现状盘点**（Explore agent 核实）：`_log(tag, msg)` 全文件 15 处调用，
+  全部只传 2 个位置参数；`tools.py`/`context.py`/`harness.py` 零 print/`_log`；`cli.py` 有
+  自己独立的 11 处 `print()`（banner/提示/退出语），和 `_log` 是两套互不相干的输出——
+  本次不碰 `cli.py`，只改 `agent.py` 的 TAOR 内部输出。
+- **`_log` 加 `level` 参数**（默认 `"normal"`）：内部每次调用都读一次 `MYAGENT_LOG`
+  （不缓存，简单正确，换来测试好控制）。`level="error"` 的调用即使 `off` 档也照打；
+  `level="debug"` 只在 `MYAGENT_LOG=debug` 才打；非法值兜底当 `normal` 处理，不报错。
+- **只标记 4 处为 `error`**（权限拦截 🛡️、死循环 🔁、验证门 🚧、护栏 ⛔——TODO.md 原文点名的
+  "关键/错误类"），其余 11 处零改动。压缩（🗜️ 三处）判为 normal 而非 error：压缩是常规工程
+  行为不是错误，这样 `off` 档"只出答案 + 错误"的语义才站得住。这就是"业务逻辑一个字不改，
+  只改怎么打日志"——判断危险命令/死循环/验证失败的代码本身完全没动。
+- **debug 档新增一行**：紧跟 `🧠 [Think]` 之后加 `📊 [debug]` 行，打印
+  `current_context_tokens(usage) / self.compact_threshold`，让用户在 debug 档下逐轮看着
+  上下文规模逼近压缩阈值，不用等压缩真触发才看到数字——呼应项目一直在做的
+  KV-cache/上下文规模调查主题（见 P1/P3 明细）。
+- **`_trace_enabled()`**：`MYAGENT_TRACE` 默认 `on`，`!= "off"` 即开启。`_dump_turn` 开头判断
+  不满足就直接 return（不写 `turn_NN.json`）。**比 TODO.md 字面描述多做一步**：`__init__`/
+  `run()` 里两处 `mkdir`（`trace_dir`/`current_task_dir`）和 `run()` 里的 `📁 [trace]`
+  announce 行也一并包进同一个判断——`MYAGENT_TRACE=off` 时不仅不写文件，连空目录都不建、
+  也不再打印一条指向"其实没在写"的路径，让"不生成新文件"这句验收语的精神更彻底地成立。
+- **测试**：`tests/test_agent_logic.py` 新增 8 个（原 5 个纯函数测试之外）：
+  - `_log` 分级 6 个（`capsys` 抓输出 + `monkeypatch.setenv`）：error 级 off 档仍打印、
+    normal 级 off 档被吞、normal 级默认/normal 档正常打印、debug 级 normal 档被吞、
+    debug 级 debug 档打印、非法值兜底当 normal（不报错、debug 行仍吞）。
+  - `_dump_turn`/`_trace_enabled` 2 个：构造真实 `Agent()`（不调 API，`test_subagent.py` 已有
+    先例）、把 `current_task_dir` 指向 `tmp_path`，验证 trace on 时写文件、off 时不写。
+- **验证**：① `py -m pytest -m "not e2e" -v` —— 62 绿（原 54 + 新增 8，无回归）；
+  ② 真实跑 `myagent` 三档对比：`MYAGENT_LOG=off` 下 TAOR 内部输出完全不可见、只剩 CLI 自己的
+  banner/最终答案；`MYAGENT_LOG=debug` 下 Think 行后多出 `📊 [debug]` 行；`MYAGENT_LOG=off`
+  + 诱导 `rm -rf` 命令，确认 `🛡️ [权限]` 拦截行依然打印（error 级不受 off 影响）；
+  ③ `MYAGENT_TRACE=off` 跑一次任务，`traces/` 目录数量前后不变（65→65），且 `📁 [trace]`
+  announce 行正确消失。
+- **文档同步**：`CLAUDE.md` 新增"## 日志开关"小节，讲清两个变量的取值/默认/作用，以及本地
+  设置的两种方式（临时前缀 vs 写进 `.env` 持久生效）；`TODO.md` T1 段落标记完成，执行顺序
+  更新为 T5-A → (T4 + T5-B)。
 
 ## P0 明细
 

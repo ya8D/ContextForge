@@ -1,8 +1,8 @@
 """
-main.py —— myagent 的正式 CLI 入口。
+cli.py —— myagent 的正式 CLI 入口（原 main.py，T3 标准包布局后改名）。
 
-用法：
-    py main.py
+用法（T2 完成 `pip install -e .` 后可直接敲 `myagent`；目前过渡期用）：
+    cd src && py -m myagent.cli
 
 启动后进入交互循环：输入任务 → agent 跑 TAOR → 打印结果 → 继续。
 输入 exit / quit / q 退出。
@@ -15,8 +15,8 @@ main.py —— myagent 的正式 CLI 入口。
 
 import sys
 
-from agent import Agent
-from tools import TOOL_SCHEMAS
+from myagent.agent import Agent
+from myagent.tools import TOOL_SCHEMAS
 
 
 def main() -> int:

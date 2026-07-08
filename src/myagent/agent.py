@@ -25,19 +25,20 @@ from pathlib import Path
 import anthropic
 from dotenv import load_dotenv
 
-from context import (
+from myagent.context import (
     COMPACT_THRESHOLD_TOKENS,
     compact_messages,
     current_context_tokens,
     should_compact,
 )
-from harness import LoopDetector, ValidationGate, check_tool_call
-from tools import TOOL_SCHEMAS, execute_tool, subagent_tool_schemas, tool
+from myagent.harness import LoopDetector, ValidationGate, check_tool_call
+from myagent.tools import TOOL_SCHEMAS, execute_tool, subagent_tool_schemas, tool
 
 # 加载 myagent/.env（代理凭据：ANTHROPIC_AUTH_TOKEN / BASE_URL / MODEL）。
 # 这套凭据由 VSCode 扩展注入其子进程，普通终端拿不到，故落到本地 .env。
-# 用相对本文件的路径，保证从任何工作目录运行都能找到。
-_HERE = Path(os.path.abspath(__file__)).parent
+# 本文件现在位于 src/myagent/ 下，.env 和 traces/ 实际在项目根，
+# 故要上跳两级（src/myagent/ → src/ → 项目根），而非本文件所在目录。
+_HERE = Path(os.path.abspath(__file__)).parent.parent.parent
 load_dotenv(_HERE / ".env")
 
 # trace 落盘根目录（已在 .gitignore 中忽略）。
@@ -52,8 +53,26 @@ _MAX_RESULT_CHARS = 50000
 
 # ── 轻量 trace 工具：让 TAOR 每一步透明可见（对照第 18.5 节 可观测性）──
 # 用带颜色/图标的前缀区分阶段，肉眼一眼就能跟上循环在做什么。
-def _log(tag: str, msg: str) -> None:
+# T1：MYAGENT_LOG 控屏幕分级（off/normal/debug，默认 normal）；level="error" 的调用点
+# （权限拦截/死循环/验证门/护栏）即使 off 档也照打——用户仍需第一时间看到问题。
+# 每次调用都读一次环境变量（不缓存），换取实现简单、测试好控制，性能代价可忽略。
+def _log(tag: str, msg: str, level: str = "normal") -> None:
+    setting = os.environ.get("MYAGENT_LOG", "normal").strip().lower()
+    if setting not in ("off", "normal", "debug"):
+        setting = "normal"  # 非法值兜底为默认档，不报错、不吞正常输出
+    if level == "error":
+        print(f"{tag} {msg}")
+        return
+    if setting == "off":
+        return
+    if level == "debug" and setting != "debug":
+        return
     print(f"{tag} {msg}")
+
+
+def _trace_enabled() -> bool:
+    """MYAGENT_TRACE 是否开启（默认 on）。独立于 MYAGENT_LOG，控制 traces/ 落盘。"""
+    return os.environ.get("MYAGENT_TRACE", "on").strip().lower() != "off"
 
 
 def _to_serializable(obj):
@@ -116,7 +135,8 @@ class Agent:
         # 一个会话（一个 Agent 实例）可跑多个任务，每个任务再单独建 task_NN 子目录，
         # 子目录里放 turn_NN.json —— 这样跨任务不会撞名覆盖。
         self.trace_dir = _TRACES_ROOT / f"run_{datetime.now():%Y%m%d_%H%M%S}"
-        self.trace_dir.mkdir(parents=True, exist_ok=True)
+        if _trace_enabled():
+            self.trace_dir.mkdir(parents=True, exist_ok=True)
         # 跨 run() 只增不减的任务计数器（第几个任务）。
         self.task_counter = 0
 
@@ -125,10 +145,12 @@ class Agent:
         # 每个任务单独建一个 task_NN 子目录，避免跨任务的 turn 文件互相覆盖。
         self.task_counter += 1
         self.current_task_dir = self.trace_dir / f"task_{self.task_counter:02d}"
-        self.current_task_dir.mkdir(parents=True, exist_ok=True)
+        if _trace_enabled():
+            self.current_task_dir.mkdir(parents=True, exist_ok=True)
 
         _log("\n🎯 [任务]", task)
-        _log("📁 [trace]", f"本任务 in/out 落盘到 {self.current_task_dir}")
+        if _trace_enabled():
+            _log("📁 [trace]", f"本任务 in/out 落盘到 {self.current_task_dir}")
         # 用户任务作为历史的第一条消息。
         self.messages.append({"role": "user", "content": task})
 
@@ -166,6 +188,10 @@ class Agent:
                               f"in={usage['input_tokens']} "
                               f"(cache_read={cr}, cache_write={cw}) / "
                               f"out={usage['output_tokens']}")
+            # debug 档专属：逐轮追踪上下文规模逼近压缩阈值的过程（不用等压缩真触发才看到数字）。
+            _log("📊 [debug]",
+                 f"当前上下文规模 {current_context_tokens(usage)} / 压缩阈值 {self.compact_threshold}",
+                 level="debug")
 
             # 把模型这一轮的输出（可能含文字 + 工具请求）原样存回历史。
             self.messages.append({"role": "assistant", "content": response.content})
@@ -186,7 +212,7 @@ class Agent:
                     _log("\n✅ [完成]", "模型未再请求工具，且通过验证门，循环结束。")
                     return final
                 # 没过验证门 → 把失败报告当 user 消息打回去，让模型继续修，不放行。
-                _log("\n🚧 [验证门]", "未通过，打回让模型继续修复。")
+                _log("\n🚧 [验证门]", "未通过，打回让模型继续修复。", level="error")
                 self.messages.append({
                     "role": "user",
                     "content": (f"[验证门] 你声称完成了，但强制检查未通过。"
@@ -208,7 +234,7 @@ class Agent:
             # 最坏情况由 max_iterations 兜底。
             self.loop_detector.record_round(tool_use_blocks)
             if self.loop_detector.is_looping():
-                _log("\n🔁 [死循环]", "连续多轮相同 action，注入换思路提示、打断。")
+                _log("\n🔁 [死循环]", "连续多轮相同 action，注入换思路提示、打断。", level="error")
                 self.messages.append({
                     "role": "user",
                     "content": ("[死循环检测] 你连续多次重复了完全相同的操作但没有进展。"
@@ -229,7 +255,7 @@ class Agent:
                 if ok:
                     to_execute.append(block)
                 else:
-                    _log("🛡️ [权限]", f"拦截 {block.name} 参数={block.input} —— {reason}")
+                    _log("🛡️ [权限]", f"拦截 {block.name} 参数={block.input} —— {reason}", level="error")
 
             # 并行执行放行的工具（对照第 15.2 节 并行工具调用）。
             executed: dict = {}  # block.id -> 执行结果
@@ -268,11 +294,13 @@ class Agent:
             self._maybe_compact(usage)
 
         # 达到最大轮数还没结束 —— 护栏触发。
-        _log("\n⛔ [护栏]", f"达到最大轮数 {self.max_iterations}，强制停止。")
+        _log("\n⛔ [护栏]", f"达到最大轮数 {self.max_iterations}，强制停止。", level="error")
         return "[未完成] 达到最大迭代轮数。"
 
     def _dump_turn(self, turn: int, messages_sent, usage, stop_reason) -> None:
         """把这一轮的完整 in/out 落盘成一个 JSON 文件，供实地调查。"""
+        if not _trace_enabled():
+            return  # MYAGENT_TRACE=off：不落盘（屏幕日志仍受 MYAGENT_LOG 独立控制）。
         # 写进当前任务的子目录，turn 是「本任务内」的轮次，跨任务不会撞名。
         path = self.current_task_dir / f"turn_{turn:02d}.json"
         payload = {
@@ -306,7 +334,7 @@ class Agent:
         复用 tools.run_command 执行——同 summarizer 注入思路：ValidationGate 只懂
         「验证的判据」，具体怎么跑命令由这个注入的回调完成，逻辑与副作用分离。
         """
-        from tools import run_command
+        from myagent.tools import run_command
         return run_command(command)
 
     def _maybe_compact(self, usage: dict) -> None:

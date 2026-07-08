@@ -7,8 +7,8 @@ test_context.py —— P3 上下文压缩的纯逻辑测试（不烧钱、毫秒
 跑法：py -m pytest tests/test_context.py -v （属于 "not e2e" 那批）
 """
 
-import context
-from context import (
+from myagent import context
+from myagent.context import (
     KEEP_RECENT_TURNS,
     compact_messages,
     current_context_tokens,

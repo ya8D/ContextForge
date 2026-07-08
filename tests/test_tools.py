@@ -9,8 +9,8 @@ run_command 的错误兜底、execute_tool 分发。
     py -m pytest -m "not e2e"           # 跑所有非端到端测试
 """
 
-import tools
-from tools import (
+from myagent import tools
+from myagent.tools import (
     TOOL_SCHEMAS,
     execute_tool,
     read_file,
