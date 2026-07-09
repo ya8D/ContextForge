@@ -321,26 +321,32 @@
 
 ## 指令驱动压缩（轮数不足时的 /compact 降级路径）
 
-- **起因**：实测发现会话较短（轮数 `<= KEEP_RECENT_TURNS=3`）时敲 `/compact 删掉后50名`，
-  结构化压缩切不出中段、返回 None，回一句「轮数不足以压缩」——**用户带了明确要求也被拒**。
-  但用户是有意识地要按自己的方式压，此时「什么都不做」不合理。
-- **设计（对话敲定）**：新增降级路径，只接主动 `/compact`、且**必须带 directive** 才触发：
-  - 保头 = `messages[0]`（最早的目标锚点，别让 agent 忘了要干嘛）。
-  - 保尾 = 最近 **1 轮**（护住当前正在做的任务 / 刚发的 `/compact` 指令本身；比结构化的 3 轮少）。
-  - 压中间 = 头尾之间全部，**纯按 directive 让 AI 压**，不叠加四维基础要求（`_SUMMARY_PROMPT`）——
-    因为保头已护住锚点，轮数不足时放手让用户的要求说了算。
-  - **裸 `/compact`（无 directive）轮数不足仍不压**：没有「用户给的方式」可依，维持现状最安全。
-  - **被动压缩 `_maybe_compact` 不改**：阈值触发场景轮数通常够，且被动路径不该在短历史上
-    自作主张压当前任务。
-- **`context.py`**：新增 `compact_by_directive(messages, summarizer, directive)` +
-  `_build_directive_only_prompt(directive)`（纯指令 prompt）。复用 `_split_into_turns` /
-  `_render_middle_for_summary`，stats 结构与 `compact_messages` 一致，上层打印无需分叉。
+- **起因**：实测发现会话较短时敲 `/compact 删掉后50名`，结构化压缩切不出中段、返回 None，
+  回一句「轮数不足以压缩」——**用户带了明确要求也被拒**。用户是有意识地要按自己的方式压，
+  此时「什么都不做」不合理。
+- **最终设计（方案 C）**：新增降级路径，只接主动 `/compact`、且**必须带 directive** 才触发：
+  - 保**首条** `messages[0]`（最早的目标锚点，别让 agent 忘了要干嘛）。
+  - 按 directive **压其余** `messages[1:]`，压成一条摘要。压缩后 = `[首条, 摘要]`。
+  - prompt 不叠加四维基础要求（`_SUMMARY_PROMPT`），完全按 directive（保头已护住锚点，放手让
+    用户的要求说了算）。压缩痕迹由摘要 marker 承载（含「按要求：<directive>」，AI 后续读到即知
+    这里按什么压过）。
+  - **裸 `/compact`（无 directive）仍不压**：没有「用户给的方式」可依，维持现状最安全。
+  - **被动压缩 `_maybe_compact` 不改**。
+- **关键教训（几轮迭代才收敛）**：`/compact` 指令**根本不进历史**——[cli.py](src/contextforge/cli.py)
+  拦截该命令后直接调 `compact_now` 再 `continue`，从不 append。故真实短会话（模型直答）历史就是
+  `[A问题, B回答]` **两条**，想压的正是 B。中途试过「保首条 + 保末条 + 压中间」，但「保末条」在
+  两条历史里恰好把要压的 B 保住了、压不动（同一条不能既保又压）；也依赖模型是否用了工具（用了才有
+  ≥3 条、有中间可压），行为不稳定。方案 C **保首条 + 压其余**才真正修好：`[A,B]` → `[A, B摘要]`，
+  两条直答型历史也能压。
+- **`context.py`**：`compact_by_directive(messages, summarizer, directive)`（保首条 + 压 `messages[1:]`，
+  门槛 `len>=2`）+ `_build_directive_only_prompt`（纯指令 prompt）。复用 `_render_middle_for_summary`，
+  stats 键与 `compact_messages` 一致、上层打印不分叉。无配对风险（其余整段成摘要、保头是纯文本任务）。
 - **`agent.py`**：`compact_now` 在结构化压缩返回 None **且 directive 非空**时，降级调
   `compact_by_directive`（同一个 `_pick_summarizer()`，self/subagent 执行者选择照样生效）。
-- **测试**：`test_context.py` +4（短历史按指令压、prompt 纯指令不含四维、缺 directive 不压、
-  太短不压）；`test_agent_logic.py` +2（轮数不足带 directive 走降级真压且保头、裸 /compact 不压）。
-- **验证**：`py -m pytest -m "not e2e"` 91 绿（85+6，无回归）；交互实测 A→B→C 场景
-  （问答后 `/compact 只保留结论` 返回「已压缩」而非「未压缩」）。
+- **测试**：`test_context.py`（保首压其余、两条直答型能压、纯指令不含四维、缺 directive 不压、
+  不足 2 条不压）；`test_agent_logic.py`（带 directive 走降级真压且保首、裸 /compact 不压）。
+- **验证**：`py -m pytest -m "not e2e"` 全绿；真实 API 复刻百家姓——`/compact 删掉后五十名`
+  返回「已压缩」，`messages` 变成 `[A, 摘要]`，保住 A、把排名按要求压掉。
 
 ## T6 明细（简历前缺口补齐 · 让「机制有」变成「用户能用」）
 

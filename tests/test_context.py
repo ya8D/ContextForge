@@ -213,25 +213,47 @@ def test_directive_recorded_in_summary_marker():
     assert "只保留数据库 schema" in summary_msg["content"]
 
 
-# ── 指令驱动压缩（compact_by_directive）：轮数不足时的降级路径 ──
+# ── 指令驱动压缩（compact_by_directive）：保首条 + 按 directive 压其余 ──
 
-def test_compact_by_directive_short_history_compacts():
-    """短历史（结构化压缩会返回 None）+ 带 directive → 按指令压一次。
+def _ab_messages():
+    """复刻真实场景：A(user问题) + B(assistant回答)。
 
-    验证：保头 messages[0]、保尾最近 1 轮原文、中间换成含 directive marker 的摘要。
+    /compact 指令不进历史，故用户主动压时历史往往就是这两条，想压的正是 B。
     """
-    msgs = _build_history(2)  # 头 + 2 轮：结构化(keep 3)切不出中段，但降级路径够压
-    # 前提：结构化压缩此时确实压不了（回 None），证明这是「轮数不足」场景。
-    assert compact_messages(msgs, _fake_summarizer, keep_recent_turns=3)[1] is None
+    return [
+        {"role": "user", "content": "A：百家姓前一百排名是怎样的？存到临时上下文。"},
+        {"role": "assistant", "content": "B：1-50 赵钱孙李…；51-100 昌马苗凤…（全文排名）"},
+    ]
 
+
+def test_compact_by_directive_keeps_head_compacts_rest():
+    """带 directive → 压成 [头, 摘要]：保首条、其余换成含 marker 的摘要。"""
+    msgs = _ab_messages()
     new_msgs, stats = compact_by_directive(msgs, _fake_summarizer,
                                            directive="只保留结论，删掉过程")
     assert stats is not None
-    assert new_msgs[0] is msgs[0]                 # 保头（同一对象）
-    assert new_msgs[-2:] == msgs[-2:]             # 保尾：最近 1 轮原文原样
-    assert "前情摘要" in new_msgs[1]["content"]    # 中间是摘要
+    assert len(new_msgs) == 2
+    assert new_msgs[0] is msgs[0]                  # 保首条（同一对象）
+    assert "前情摘要" in new_msgs[1]["content"]     # 其余压成摘要
     assert "只保留结论，删掉过程" in new_msgs[1]["content"]
-    assert stats["kept_recent_turns"] == 1
+    assert stats["kept_recent_turns"] == 0         # 不单独保末条
+
+
+def test_compact_by_directive_two_message_history():
+    """用户实测场景：直答型 [A, B] 两条历史也必须能压（上一版核心缺陷）。"""
+    captured = {}
+
+    def capturing(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return "压缩后的摘要"
+
+    msgs = _ab_messages()
+    new_msgs, stats = compact_by_directive(msgs, capturing, directive="删掉后五十名的排名")
+    assert stats is not None
+    assert len(new_msgs) == 2
+    assert "B：1-50" in captured["prompt"]          # 要压的 B 进了 prompt
+    assert "删掉后五十名的排名" in captured["prompt"] # directive 也进了
+    assert new_msgs[0]["content"].startswith("A：") # A 保住
 
 
 def test_compact_by_directive_prompt_is_directive_only():
@@ -242,8 +264,7 @@ def test_compact_by_directive_prompt_is_directive_only():
         captured["prompt"] = prompt
         return "摘要"
 
-    msgs = _build_history(2)
-    compact_by_directive(msgs, capturing, directive="删掉后50名")
+    compact_by_directive(_ab_messages(), capturing, directive="删掉后50名")
     assert "删掉后50名" in captured["prompt"]
     # 四维基础要求（_SUMMARY_PROMPT 的特征串）不应出现——这条是「完全听用户的」
     assert "任务目标是什么" not in captured["prompt"]
@@ -252,13 +273,13 @@ def test_compact_by_directive_prompt_is_directive_only():
 
 def test_compact_by_directive_needs_directive():
     """没有 directive（None / 空串）→ 不压，返回 (原样, None)。"""
-    msgs = _build_history(2)
+    msgs = _ab_messages()
     assert compact_by_directive(msgs, _fake_summarizer, directive=None) == (msgs, None)
     assert compact_by_directive(msgs, _fake_summarizer, directive="") == (msgs, None)
 
 
 def test_compact_by_directive_too_short():
-    """历史短到连「中间 1 轮」都切不出（头 + 1 轮）→ 不压。"""
-    msgs = _build_history(1)  # 头 + 1 轮：末尾留 1 轮后中间为空
-    assert compact_by_directive(msgs, _fake_summarizer,
-                                directive="随便压")[1] is None
+    """消息不足 2 条（没有可压的其余）→ 不压。"""
+    one = [{"role": "user", "content": "A"}]
+    assert compact_by_directive(one, _fake_summarizer, directive="随便压")[1] is None
+    assert compact_by_directive([], _fake_summarizer, directive="随便压")[1] is None

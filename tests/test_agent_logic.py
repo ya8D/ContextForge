@@ -291,15 +291,15 @@ def test_compact_now_too_few_turns_returns_not_compacted():
     assert a.messages == before
 
 
-def _seed_two_turns(a):
-    """给 agent 造「头 + 2 轮」：结构化压缩(keep 3)压不了，但降级路径够压。"""
-    a.messages = [{"role": "user", "content": "原始任务A"}]
-    for i in range(2):
-        a.messages.append({"role": "assistant", "content": [
-            {"type": "tool_use", "id": f"t{i}", "name": "read_file",
-             "input": {"path": f"f{i}.txt"}}]})
-        a.messages.append({"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": f"t{i}", "content": f"内容{i}"}]})
+def _seed_ab(a):
+    """给 agent 造 [A(user任务), B(assistant回答)] 两条——真实直答型短会话。
+
+    /compact 指令不进历史，故用户主动压时历史往往就是这两条，想压的正是 B。
+    """
+    a.messages = [
+        {"role": "user", "content": "原始任务A：列出百家姓前一百"},
+        {"role": "assistant", "content": "B：赵钱孙李…（前一百排名全文）"},
+    ]
 
 
 def test_compact_now_falls_back_to_directive_when_too_few_turns(monkeypatch):
@@ -312,13 +312,14 @@ def test_compact_now_falls_back_to_directive_when_too_few_turns(monkeypatch):
 
     a = Agent()
     monkeypatch.setattr(a, "_summarize", fake_summarize)
-    _seed_two_turns(a)
-    before_len = len(a.messages)
+    _seed_ab(a)
 
     result = a.compact_now(directive="只保留结论，删掉过程")
     assert "已压缩" in result
-    assert len(a.messages) < before_len              # 降级路径真的压了
-    assert a.messages[0]["content"] == "原始任务A"    # 保头
+    assert len(a.messages) == 2                       # [头, 摘要]
+    assert a.messages[0]["content"] == "原始任务A：列出百家姓前一百"  # 保首条
+    assert "前情摘要" in a.messages[1]["content"]      # 其余压成摘要
+    assert "B：赵钱孙李" in captured["prompt"]         # 要压的 B 进了 prompt
     assert "只保留结论，删掉过程" in captured["prompt"]
     # 走的是「纯指令」路径，prompt 不应带四维基础要求
     assert "任务目标是什么" not in captured["prompt"]
@@ -328,7 +329,7 @@ def test_compact_now_bare_compact_too_few_turns_not_compacted(monkeypatch):
     """轮数不足 + 裸 /compact（无 directive、无会话级偏好）→ 不触发降级，仍不压。"""
     a = Agent()  # 无 compact_directive
     monkeypatch.setattr(a, "_summarize", lambda p: "不该被调到")
-    _seed_two_turns(a)
+    _seed_ab(a)
     before = list(a.messages)
     result = a.compact_now()  # 不传 directive
     assert "未压缩" in result
