@@ -89,6 +89,35 @@ def test_compaction_triggers_and_task_survives():
 
 
 @pytest.mark.e2e
+def test_compaction_triggers_via_env_threshold(monkeypatch):
+    """T6：真调 API 验证「通过环境变量 MYAGENT_COMPACT_THRESHOLD 设阈值」端到端生效。
+
+    与上一个测试的区别：上面用构造参数 compact_threshold=200 设阈值；这里**只设环境变量、
+    不传构造参数**，走的正是 T6 新加的「写 .env 即生效」那条入口。证明用户在 .env 里调阈值
+    （如 Chromium 大项目调高到 800K）真的会改变压缩触发行为——这里为省钱用小数值 800 逼出
+    压缩，链路与真实调高到 800K 完全一致，只是量级相差 1000 倍。
+    """
+    monkeypatch.setenv("MYAGENT_COMPACT_THRESHOLD", "800")  # 只走环境变量入口
+    agent = Agent(max_iterations=12)  # 不传 compact_threshold
+    assert agent.compact_threshold == 800, "环境变量阈值没被读进来 —— T6 入口没生效"
+
+    task = (
+        "请严格一步一步来，一次只运行一个命令，必须看到上一个命令的输出后再运行下一个，"
+        "不要在同一轮里同时运行多个命令。依次用 run_command 运行："
+        "第1步 echo AAA、第2步 echo BBB、第3步 echo CCC、第4步 echo DDD、第5步 echo EEE，"
+        "每步都把输出告诉我，最后总结你一共运行了几个命令。"
+    )
+    final = agent.run(task)
+
+    assert isinstance(final, str) and final.strip()
+    saw_summary = any(
+        isinstance(m.get("content"), str) and "前情摘要" in m["content"]
+        for m in agent.messages
+    )
+    assert saw_summary, "历史里没有『前情摘要』—— 环境变量阈值没真正驱动压缩触发"
+
+
+@pytest.mark.e2e
 def test_harness_blocks_dangerous_command():
     """P4：真调 API 验证权限拦截在真实循环里生效。
 
