@@ -62,13 +62,13 @@ def _log(tag: str, msg: str, level: str = "normal") -> None:
     if setting not in ("off", "normal", "debug"):
         setting = "normal"  # 非法值兜底为默认档，不报错、不吞正常输出
     if level == "error":
-        print(f"{tag} {msg}")
+        print(f"[CF] {tag} {msg}")
         return
     if setting == "off":
         return
     if level == "debug" and setting != "debug":
         return
-    print(f"{tag} {msg}")
+    print(f"[CF] {tag} {msg}")
 
 
 def _trace_enabled() -> bool:
@@ -168,10 +168,13 @@ class Agent:
         self.validation_gate = ValidationGate(check_command=self.check_command)
         # 对话历史：TAOR 每一轮的「所见所想所做」都累积在这里。
         self.messages: list[dict] = []
-        # 本次会话的 trace 根目录，按时间戳命名（普通脚本可用 datetime.now）。
-        # 一个会话（一个 Agent 实例）可跑多个任务，每个任务再单独建 task_NN 子目录，
-        # 子目录里放 turn_NN.json —— 这样跨任务不会撞名覆盖。
-        self.trace_dir = _TRACES_ROOT / f"run_{datetime.now():%Y%m%d_%H%M%S}"
+        # 本次会话的 trace 根目录，按 年/月/日/run_时分秒 分层（普通脚本可用 datetime.now）。
+        # 分层便于按日期归档、避免一堆平铺时间戳。一个会话（一个 Agent 实例）可跑多个任务，
+        # 每个任务再单独建 task_NN 子目录，子目录里放 turn_NN.json —— 跨任务不会撞名覆盖。
+        _now = datetime.now()
+        self.trace_dir = (
+            _TRACES_ROOT / f"{_now:%Y}" / f"{_now:%m}" / f"{_now:%d}" / f"run_{_now:%H%M%S}"
+        )
         if _trace_enabled():
             self.trace_dir.mkdir(parents=True, exist_ok=True)
         # 跨 run() 只增不减的任务计数器（第几个任务）。

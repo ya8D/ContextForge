@@ -412,7 +412,8 @@
 - [x] `tests/01_run_agent.py`：两步任务跑通，完整 TAOR 轨迹可见
 - [x] `main.py`：正式交互式 CLI 入口（`py main.py`，输入任务 / reset / exit）
 - [x] **Token 调查 trace**：每轮把「实际发出的 messages + usage 4 字段」落盘到
-      `traces/run_<时间戳>/turn_NN.json`，循环里同步打印 `in=.. (cache_read=.., cache_write=..)`。
+      `traces/<年>/<月>/<日>/run_<时分秒>/task_NN/turn_NN.json`（按日期分层归档），
+      循环里同步打印 `in=.. (cache_read=.., cache_write=..)`。
 - **KV Cache 实地验证结论**（用户亲自调查）：`input_tokens` 只是「按全价算的部分」，
       不等于发出去的总量。turn_02 的 `messages_sent` 有 3 条（含 turn_01 全部内容），
       实际 1958 token 全进了 `cache_creation_input_tokens`，故 `input_tokens` 只剩 2。

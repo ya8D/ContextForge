@@ -10,7 +10,7 @@ cli.py —— ContextForge 的正式 CLI 入口（原 main.py）。
 说明：
 - 同一个 Agent 实例贯穿整个会话，self.messages 会累积 —— 所以后一个任务
   能记得前一个（这就是「短期记忆」的雏形）。想清空记忆重新开始，输入 reset。
-- 每轮的完整 in/out 会落盘到 <项目根>/traces/run_<时间戳>/，供调查 KV Cache。
+- 每轮的完整 in/out 会落盘到 <项目根>/traces/<年>/<月>/<日>/run_<时分秒>/，供调查 KV Cache。
 """
 
 import sys
