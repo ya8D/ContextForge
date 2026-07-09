@@ -7,8 +7,8 @@ test_context.py —— P3 上下文压缩的纯逻辑测试（不烧钱、毫秒
 跑法：py -m pytest tests/test_context.py -v （属于 "not e2e" 那批）
 """
 
-from myagent import context
-from myagent.context import (
+from contextforge import context
+from contextforge.context import (
     KEEP_RECENT_TURNS,
     compact_messages,
     current_context_tokens,
@@ -170,7 +170,7 @@ def test_summarizer_receives_middle_content():
 
 def test_directive_none_prompt_identical_to_p3():
     """directive=None 时，传给 summarizer 的 prompt 与 P3 逐字相同（向后兼容钉死）。"""
-    from myagent.context import _SUMMARY_PROMPT
+    from contextforge.context import _SUMMARY_PROMPT
 
     captured = {}
 

@@ -3,9 +3,9 @@ requires = ["setuptools>=65"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "myagent"
+name = "contextforge"
 version = "0.1.0"
-description = "从零手搓的 agent / harness 学习项目"
+description = "面向超大型代码库的可控编码 agent，特色是可客制化的上下文压缩"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.40.0",
@@ -14,7 +14,8 @@ dependencies = [
 ]
 
 [project.scripts]
-myagent = "myagent.cli:main"
+contextforge = "contextforge.cli:main"
+cf = "contextforge.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

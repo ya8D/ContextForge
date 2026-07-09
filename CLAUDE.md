@@ -1,4 +1,4 @@
-# myagent — 项目宪法（CLAUDE.md）
+# ContextForge — 项目宪法（CLAUDE.md）
 
 > 本文件是项目的**稳定约定**。易变的进度见 [PROGRESS.md](./PROGRESS.md)，两者分开维护。
 
@@ -25,17 +25,17 @@
 
 | 变量 | 取值 | 默认 | 作用 |
 |---|---|---|---|
-| `MYAGENT_LOG` | `off` / `normal` / `debug` | `normal` | 控**屏幕**输出：`off` 只出最终答案 + 权限拦截/死循环/验证门/护栏这类错误；`normal` 是现在的样子（TAOR 每轮 Think/Act/Observe）；`debug` 再加逐轮上下文规模等细节。 |
-| `MYAGENT_TRACE` | `on` / `off` | `on` | 独立控 `traces/` 落盘。可以「屏幕安静但文件还留着」，反之亦可。 |
+| `CONTEXTFORGE_LOG` | `off` / `normal` / `debug` | `normal` | 控**屏幕**输出：`off` 只出最终答案 + 权限拦截/死循环/验证门/护栏这类错误；`normal` 是现在的样子（TAOR 每轮 Think/Act/Observe）；`debug` 再加逐轮上下文规模等细节。 |
+| `CONTEXTFORGE_TRACE` | `on` / `off` | `on` | 独立控 `traces/` 落盘。可以「屏幕安静但文件还留着」，反之亦可。 |
 
 本地怎么设置：
 - **临时单次**（当前终端是 git-bash，前缀语法直接可用）：
   ```bash
-  MYAGENT_LOG=debug myagent
-  MYAGENT_LOG=off MYAGENT_TRACE=off myagent
+  CONTEXTFORGE_LOG=debug contextforge
+  CONTEXTFORGE_LOG=off CONTEXTFORGE_TRACE=off contextforge
   ```
-- **持久默认**：写进 `myagent/.env`（已 gitignore，`load_dotenv` 自动加载）一行，比如
-  `MYAGENT_LOG=debug`，之后每次敲 `myagent` 都生效，无需再加前缀。
+- **持久默认**：写进 项目根的 `.env`（已 gitignore，`load_dotenv` 自动加载）一行，比如
+  `CONTEXTFORGE_LOG=debug`，之后每次敲 `contextforge` 都生效，无需再加前缀。
 
 ## 压缩相关环境变量（T5-A / T6）
 
@@ -43,9 +43,9 @@
 
 | 变量 | 取值 | 默认 | 作用 |
 |---|---|---|---|
-| `MYAGENT_COMPACT_DIRECTIVE` | 一段自然语言 | 无（走默认四维） | 会话级压缩偏好：被动压缩时告诉模型「保什么、删什么」（如「保留所有 Browser 相关报错，其余精简」）。 |
-| `MYAGENT_COMPACT_THRESHOLD` | 正整数（token） | `500000` | 上下文超过它才自动压缩。Chromium 这类大项目可调高、用满更多上下文再压。非法值兜底回默认。 |
-| `MYAGENT_COMPACT_EXECUTOR` | `self` / `subagent` | `self` | 压缩执行者：`self` 模型单次总结；`subagent` 派带工具的子 agent 回读文件核实结论后再写摘要。 |
+| `CONTEXTFORGE_COMPACT_DIRECTIVE` | 一段自然语言 | 无（走默认四维） | 会话级压缩偏好：被动压缩时告诉模型「保什么、删什么」（如「保留所有 Browser 相关报错，其余精简」）。 |
+| `CONTEXTFORGE_COMPACT_THRESHOLD` | 正整数（token） | `500000` | 上下文超过它才自动压缩。Chromium 这类大项目可调高、用满更多上下文再压。非法值兜底回默认。 |
+| `CONTEXTFORGE_COMPACT_EXECUTOR` | `self` / `subagent` | `self` | 压缩执行者：`self` 模型单次总结；`subagent` 派带工具的子 agent 回读文件核实结论后再写摘要。 |
 
 > CLI 里还有 `/compact [要求]` 命令做**主动压缩**（当场输入的要求即本次压缩偏好），见运行方式。
 
@@ -54,9 +54,9 @@
 
 - Python：**系统 Python 3.11**，用 `py` 启动器调用（bash 里 `python` / `python3` 不通）。
 - 不建虚拟环境，依赖装在全局。安装：`py -m pip install -r requirements.txt`
-- **可编辑安装**（T2 起）：`py -m pip install -e .` 后，**任意目录**敲 `myagent` 即可启动交互
-  CLI（`pyproject.toml` 声明的 console_scripts 入口）。`-e` 可编辑模式：改代码立即生效，
-  无需重装。
+- **可编辑安装**（T2 起）：`py -m pip install -e .` 后，**任意目录**敲 `contextforge`（或短别名
+  `cf`）即可启动交互 CLI（`pyproject.toml` 声明的 console_scripts 入口）。`-e` 可编辑模式：
+  改代码立即生效，无需重装。
 - **CLI 交互命令**：`exit`/`quit`/`q` 退出；`reset` 清空记忆开新会话；
   `/compact [要求]` 手动压缩历史（T5-A）——可跟一段话指定保留/删除什么
   （如 `/compact 只保留登录相关报错，其余删掉`），不跟则按默认/会话级偏好压。
@@ -69,12 +69,12 @@
 ## 目录
 
 ```
-myagent/
-  pyproject.toml         # console_scripts 入口（myagent = myagent.cli:main）+ src 布局声明
+<项目根>/
+  pyproject.toml         # console_scripts 入口（contextforge = contextforge.cli:main）+ src 布局声明
   requirements.txt      # anthropic + tiktoken
-  pytest.ini            # pythonpath = src，让 tests/ 能 import src/myagent 包
+  pytest.ini            # pythonpath = src，让 tests/ 能 import src/contextforge 包
   src/
-    myagent/
+    contextforge/
       __init__.py       # 包标记
       agent.py          # 核心 TAOR loop（后续阶段逐步长大）
       tools.py          # 工具注册表 + 内置工具（含 P5 spawn_subagent 派生子 agent）
@@ -85,7 +85,7 @@ myagent/
     00_smoke_test.py    # 最小 API 调用验证
 ```
 （除 requirements/smoke 外，其余文件随对应 Phase 逐步创建。T3 起源码收进
-`src/myagent/`，标准 Python 包布局；T2 起 `pip install -e .` 后任意目录可直接敲 `myagent` 启动。）
+`src/contextforge/`，标准 Python 包布局；T2 起 `pip install -e .` 后任意目录可直接敲 `contextforge` 启动。）
 
 ## 编码风格
 

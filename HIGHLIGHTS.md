@@ -1,4 +1,4 @@
-# myagent 设计亮点（HIGHLIGHTS）
+# ContextForge 设计亮点（HIGHLIGHTS）
 
 > 这个项目哪里特别、为什么这么设计——一页速览。开发流水见 [PROGRESS.md](./PROGRESS.md)，
 > 稳定约定见 [CLAUDE.md](./CLAUDE.md)。
@@ -6,42 +6,42 @@
 ## harness：用代码强制，不靠模型自律
 
 - **先读再改**：没 `read_file` 读过的已存在文件禁止 `write_file`，防模型基于想象的内容盲改。
-  → [tools.py `write_file` / `READ_FILES`](./src/myagent/tools.py)
+  → [tools.py `write_file` / `READ_FILES`](./src/contextforge/tools.py)
 - **危险命令运行时拦截**：不预筛工具，而是执行前正则拦 `rm -rf` / `format` / `chmod -R 777` 等。
-  → [harness.py `check_command_safety`](./src/myagent/harness.py)
+  → [harness.py `check_command_safety`](./src/contextforge/harness.py)
 - **验证门防假完成**：模型声称完成时强制跑检查命令，没过就打回——对治 LLM 的完成偏见。
-  → [harness.py `ValidationGate`](./src/myagent/harness.py)
+  → [harness.py `ValidationGate`](./src/contextforge/harness.py)
 - **死循环检测按整轮 + 排序指纹**：只看第一个工具会漏报（多工具乱序循环）又误报（首工具相同但
-  整轮在推进）；命中后不 reset，避免"每 3 轮才拦一次"放水。→ [harness.py `record_round`](./src/myagent/harness.py)
+  整轮在推进）；命中后不 reset，避免"每 3 轮才拦一次"放水。→ [harness.py `record_round`](./src/contextforge/harness.py)
 
 ## 注入式设计：逻辑与副作用分离
 
 - **副作用靠回调注入，纯逻辑可单测**：`compact_messages` 的 summarizer、`ValidationGate` 的 runner
   都把唯一的副作用（调 LLM / 跑命令）做成可传入回调，测试传假回调即可全覆盖决策逻辑、零 API 调用。
-  → [context.py `compact_messages`](./src/myagent/context.py)
+  → [context.py `compact_messages`](./src/contextforge/context.py)
 - **sub-agent 就是「一个工具」**：`spawn_subagent` 是普通 `@tool`，内部 `new Agent()` 跑完只回传结论；
-  上下文隔离靠两个 Agent 实例的 messages 是独立 list 天然成立。→ [agent.py `spawn_subagent`](./src/myagent/agent.py)
+  上下文隔离靠两个 Agent 实例的 messages 是独立 list 天然成立。→ [agent.py `spawn_subagent`](./src/contextforge/agent.py)
 - **循环 import 是「东西放错层」的信号**：`spawn_subagent` 需要 Agent，故定义在 agent.py 而非 tools.py——
   延迟 import 只治标，挪到依赖正确的层才根治。
 
 ## 上下文压缩：本地重写，可客制化
 
 - **压缩 = 在本地重写 messages，不是截断 API**：把中段多轮原文换成一条前情摘要，下轮发出去就短了，
-  API 无从知晓。控制权全在本地。→ [context.py `compact_messages`](./src/myagent/context.py)
+  API 无从知晓。控制权全在本地。→ [context.py `compact_messages`](./src/contextforge/context.py)
 - **压缩偏好可注入 + 执行者可切换**：用户能用自然语言指定压缩时保什么删什么；执行者可从「盲总结一次」
   切成「派带工具的子 agent」——后者能 `read_file` 回读核实结论是否还成立，而非凭记忆。
-  → [agent.py `_pick_summarizer` / `_summarize_via_subagent`](./src/myagent/agent.py)
+  → [agent.py `_pick_summarizer` / `_summarize_via_subagent`](./src/contextforge/agent.py)
 - **压缩指令本身会过模型的安全判断**：措辞越像「系统化删除/隐藏带标识的东西」越可能被拒答；换成
   「降频/去重」的正向表述语义等价却不触发。→ 见 [tests/test_e2e.py](./tests/test_e2e.py) 相关用例
 
 ## 可观测性 & 工程细节
 
 - **trace 输入侧 / 输出侧各记各的**：`messages_sent` 是调 LLM 前的输入快照，`response_content` 是本轮
-  模型输出，分开存互不污染——单看输入侧曾复盘不了模型回复。→ [agent.py `_dump_turn`](./src/myagent/agent.py)
-- **日志分级用字符串枚举**：`MYAGENT_LOG=off/normal/debug` 比 `0/1/2` 自解释，且与 `MYAGENT_TRACE=on/off`
-  统一；`error` 级即使 `off` 档也照打。屏幕分级和落盘是两个独立开关。→ [agent.py `_log`](./src/myagent/agent.py)
+  模型输出，分开存互不污染——单看输入侧曾复盘不了模型回复。→ [agent.py `_dump_turn`](./src/contextforge/agent.py)
+- **日志分级用字符串枚举**：`CONTEXTFORGE_LOG=off/normal/debug` 比 `0/1/2` 自解释，且与 `CONTEXTFORGE_TRACE=on/off`
+  统一；`error` 级即使 `off` 档也照打。屏幕分级和落盘是两个独立开关。→ [agent.py `_log`](./src/contextforge/agent.py)
 - **配置读取一律「显式 > 环境变量 > 默认」**：`model` 读 `ANTHROPIC_MODEL`、`compact_directive` 读
-  `MYAGENT_COMPACT_DIRECTIVE`，写 `.env` 即持久生效，显式传参仍可覆盖。→ [agent.py `Agent.__init__`](./src/myagent/agent.py)
+  `CONTEXTFORGE_COMPACT_DIRECTIVE`，写 `.env` 即持久生效，显式传参仍可覆盖。→ [agent.py `Agent.__init__`](./src/contextforge/agent.py)
 
 ## 测试哲学
 

@@ -1,7 +1,11 @@
-# TODO —— myagent 后续计划
+# TODO —— ContextForge 后续计划
 
 > 本文件记「计划要做的」。稳定约定见 [CLAUDE.md](./CLAUDE.md)。
 > 已完成事项会保留在本文件并标记状态，便于回溯；详细实现过程见 [PROGRESS.md](./PROGRESS.md)。
+>
+> 📌 **本项目原名 `myagent`，现更名 `ContextForge`**（包 `contextforge`，命令 `contextforge` / `cf`，
+> 环境变量前缀 `CONTEXTFORGE_`）。下方「已完成」区里出现的 `myagent` / `MYAGENT_` 是**当时的名字**，
+> 作为历史记录保留；现在照着用请换新名。更名详情见 [PROGRESS.md](./PROGRESS.md)「项目更名」一节。
 
 ## 执行顺序（剩余）
 

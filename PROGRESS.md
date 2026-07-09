@@ -1,6 +1,10 @@
 # 进度（PROGRESS）
 
 > 稳定约定见 [CLAUDE.md](./CLAUDE.md)。本文件只记易变的进度。
+>
+> 📌 **本项目原名 `myagent`，现更名 `ContextForge`**（包名 `contextforge`，命令 `contextforge` / `cf`，
+> 环境变量前缀 `CONTEXTFORGE_`）。下方 P1–P5、T 系列明细中出现的 `myagent` / `MYAGENT_` 是**当时的名字**，
+> 作为历史记录保留不改；现在照着跑请用新名。更名详情见文末「项目更名」一节。
 
 ## 阶段总览
 
@@ -375,3 +379,27 @@
 - **模型 ID 从环境读**，不写死。当前为 `claude-opus-4-8[1m]`。
 - **myagent 位置**：`C:\AI_learning\myagent`（平级），非仓库内。
 - **代理端口**：`http://127.0.0.1:23333/api/anthropic`，VSCode 开着时才在（本地服务）。
+
+## 项目更名（myagent → ContextForge）
+
+**为什么**：`myagent` 只是占位名，已不能反映项目实质——它围绕**超大型代码库（Chromium）**做了实打实的
+优化：可客制化的上下文压缩（内容 + 触发阈值双维度可调）、危险 git 命令拦截等。核心特色是「对上下文的
+客制化锻造 / 压缩」，故定名 **ContextForge**（`Context` + `Forge`）。
+
+**否掉的备选**：`Architector`——拼写是生造词，且「架构重构 assistant」承诺了项目**并未实现**的能力
+（会误导）。`ContextForge` 拼写正确、直指真实核心、不过度承诺。
+
+**改了什么**：
+- 包名 `myagent` → `contextforge`（`git mv src/myagent src/contextforge` 保留历史）。
+- 命令：注册**两个**入口 `contextforge`（正式）+ `cf`（快捷别名）。
+- 环境变量前缀 `MYAGENT_*` → `CONTEXTFORGE_*`（5 个：`LOG` / `TRACE` / `COMPACT_DIRECTIVE` /
+  `COMPACT_THRESHOLD` / `COMPACT_EXECUTOR`）。
+- `pyproject.toml` 包名 + description + 双 scripts；`.env` 里的实设/注释同步。
+- 文档：README / CLAUDE / HIGHLIGHTS 全改为新名；本文件与 TODO 顶部加更名说明，**历史明细里
+  P1–P5、T 系列出现的 `myagent` / `MYAGENT_` 作为「当时的名字」保留不改**（改了反而失真）。
+
+**不用改**：`_HERE = .parent.parent.parent`（`src/contextforge/` → `src/` → 根，深度没变）；
+物理仓库文件夹仍是 `C:\AI_learning\myagent`（只搬了包目录，没重命名外层文件夹）。
+
+**验证**：`py -m pytest -m "not e2e"` 全绿（82）；`cf` / `contextforge` 两命令均可启动；
+`grep -rn "myagent\|MYAGENT_" src/ tests/ pyproject.toml` 代码/配置零残留（仅历史文档叙述保留旧名）。

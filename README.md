@@ -1,8 +1,9 @@
-# myagent —— 从零手搓的 Agent / Harness 系统
+# ContextForge —— 面向超大型代码库的可控编码 Agent
 
-一个**从零开始、不用框架**（不依赖 LangChain / LangGraph）手写的 AI agent 系统，
-用 **Anthropic (Claude) SDK**，把 agent 的每一层机制都亲手实现一遍——目标是**理解原理**，
-而非造一个通用框架。
+一个**从零手写、不用框架**（不依赖 LangChain / LangGraph）的 AI 编码 agent，用
+**Anthropic (Claude) SDK** 把 agent 的每一层机制亲手实现一遍，并针对超大型项目（如 Chromium）
+的真实痛点做了优化——特色是**可客制化的上下文压缩**（内容 + 触发阈值双维度可调）与
+**代码强制的安全约束**（含危险 git 命令拦截）。
 
 配套教材是隔壁的 mdBook `agent_learning`，本项目边搭边对照其章节。
 
@@ -31,8 +32,8 @@
 ## 目录
 
 ```
-pyproject.toml # console_scripts 入口（myagent 命令）+ src 布局声明
-src/myagent/
+pyproject.toml # console_scripts 入口（contextforge / cf 命令）+ src 布局声明
+src/contextforge/
   agent.py     # 核心 TAOR 循环 + spawn_subagent
   tools.py     # 工具注册表（@tool 装饰器）+ read_file / run_command / write_file
   context.py   # 上下文压缩（P3）
@@ -51,9 +52,9 @@ CLAUDE.md      # 项目稳定约定（选型 / 语言 / 运行方式）
 
 ```bash
 py -m pip install -r requirements.txt      # 装依赖（anthropic + pytest 等）
-py -m pip install -e .                      # 可编辑安装，注册 myagent 命令
+py -m pip install -e .                      # 可编辑安装，注册 contextforge / cf 命令
 
-myagent                                     # 任意目录敲命令即可交互：输入任务 / reset / exit
+contextforge                                # 任意目录敲命令即可交互（或短别名 cf）：输入任务 / reset / exit
 
 py -m pytest -m "not e2e"                   # 跑纯逻辑测试（毫秒级，不烧钱）
 py -m pytest                                # 跑全部（含真调 API 的 e2e）

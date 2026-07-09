@@ -25,19 +25,19 @@ from pathlib import Path
 import anthropic
 from dotenv import load_dotenv
 
-from myagent.context import (
+from contextforge.context import (
     COMPACT_THRESHOLD_TOKENS,
     compact_messages,
     current_context_tokens,
     should_compact,
 )
-from myagent.harness import LoopDetector, ValidationGate, check_tool_call
-from myagent.tools import TOOL_SCHEMAS, execute_tool, subagent_tool_schemas, tool
+from contextforge.harness import LoopDetector, ValidationGate, check_tool_call
+from contextforge.tools import TOOL_SCHEMAS, execute_tool, subagent_tool_schemas, tool
 
-# 加载 myagent/.env（代理凭据：ANTHROPIC_AUTH_TOKEN / BASE_URL / MODEL）。
+# 加载项目根的 .env（代理凭据：ANTHROPIC_AUTH_TOKEN / BASE_URL / MODEL）。
 # 这套凭据由 VSCode 扩展注入其子进程，普通终端拿不到，故落到本地 .env。
-# 本文件现在位于 src/myagent/ 下，.env 和 traces/ 实际在项目根，
-# 故要上跳两级（src/myagent/ → src/ → 项目根），而非本文件所在目录。
+# 本文件位于 src/contextforge/ 下，.env 和 traces/ 实际在项目根，
+# 故要上跳两级（src/contextforge/ → src/ → 项目根），而非本文件所在目录。
 _HERE = Path(os.path.abspath(__file__)).parent.parent.parent
 load_dotenv(_HERE / ".env")
 
@@ -53,11 +53,11 @@ _MAX_RESULT_CHARS = 50000
 
 # ── 轻量 trace 工具：让 TAOR 每一步透明可见（对照第 18.5 节 可观测性）──
 # 用带颜色/图标的前缀区分阶段，肉眼一眼就能跟上循环在做什么。
-# T1：MYAGENT_LOG 控屏幕分级（off/normal/debug，默认 normal）；level="error" 的调用点
+# T1：CONTEXTFORGE_LOG 控屏幕分级（off/normal/debug，默认 normal）；level="error" 的调用点
 # （权限拦截/死循环/验证门/护栏）即使 off 档也照打——用户仍需第一时间看到问题。
 # 每次调用都读一次环境变量（不缓存），换取实现简单、测试好控制，性能代价可忽略。
 def _log(tag: str, msg: str, level: str = "normal") -> None:
-    setting = os.environ.get("MYAGENT_LOG", "normal").strip().lower()
+    setting = os.environ.get("CONTEXTFORGE_LOG", "normal").strip().lower()
     if setting not in ("off", "normal", "debug"):
         setting = "normal"  # 非法值兜底为默认档，不报错、不吞正常输出
     if level == "error":
@@ -71,19 +71,19 @@ def _log(tag: str, msg: str, level: str = "normal") -> None:
 
 
 def _trace_enabled() -> bool:
-    """MYAGENT_TRACE 是否开启（默认 on）。独立于 MYAGENT_LOG，控制 traces/ 落盘。"""
-    return os.environ.get("MYAGENT_TRACE", "on").strip().lower() != "off"
+    """CONTEXTFORGE_TRACE 是否开启（默认 on）。独立于 CONTEXTFORGE_LOG，控制 traces/ 落盘。"""
+    return os.environ.get("CONTEXTFORGE_TRACE", "on").strip().lower() != "off"
 
 
 def _resolve_compact_threshold(explicit: int | None) -> int:
-    """解析压缩触发阈值。优先级：显式传参 > MYAGENT_COMPACT_THRESHOLD > 默认 500K。
+    """解析压缩触发阈值。优先级：显式传参 > CONTEXTFORGE_COMPACT_THRESHOLD > 默认 500K。
 
     环境变量非法（非正整数）时兜底回默认，不报错——配置写错不该让 agent 起不来。
     Chromium 这类大项目可把阈值调高，用满更多上下文再触发压缩。
     """
     if explicit is not None:
         return explicit
-    raw = os.environ.get("MYAGENT_COMPACT_THRESHOLD")
+    raw = os.environ.get("CONTEXTFORGE_COMPACT_THRESHOLD")
     if raw:
         try:
             val = int(raw.strip())
@@ -139,7 +139,7 @@ class Agent:
         self.client = anthropic.Anthropic()
         # 硬护栏：循环最多转几轮，防止失控无限循环烧 token（第 1.3 节 护栏）。
         self.max_iterations = max_iterations
-        # 上下文压缩阈值（真实 token）。优先级：显式传参 > 环境变量 MYAGENT_COMPACT_THRESHOLD
+        # 上下文压缩阈值（真实 token）。优先级：显式传参 > 环境变量 CONTEXTFORGE_COMPACT_THRESHOLD
         # （写 .env 持久生效，Chromium 这类大项目可调高以用满更多上下文再压）> 默认 500K。
         # 测试可传小值以便低成本触发压缩、验证「压缩链真的通」而不必真塞 500K。
         self.compact_threshold = _resolve_compact_threshold(compact_threshold)
@@ -148,13 +148,13 @@ class Agent:
         self.tool_schemas = tools if tools is not None else TOOL_SCHEMAS
         # ── T5-A 客制化 compact ──
         # 会话级压缩偏好：被动压缩（到阈值自动触发）默认带上它。
-        # 优先级：显式传参 > 环境变量 MYAGENT_COMPACT_DIRECTIVE（写 .env 持久生效）> None（默认四维）。
+        # 优先级：显式传参 > 环境变量 CONTEXTFORGE_COMPACT_DIRECTIVE（写 .env 持久生效）> None（默认四维）。
         # 与 self.model 读 ANTHROPIC_MODEL 同款兜底思路，无需给 CLI 加新命令。
-        self.compact_directive = compact_directive or os.environ.get("MYAGENT_COMPACT_DIRECTIVE") or None
+        self.compact_directive = compact_directive or os.environ.get("CONTEXTFORGE_COMPACT_DIRECTIVE") or None
         # 压缩执行者："self"（默认，_summarize 盲总结）或 "subagent"（派带工具的子 agent 回读核实）。
-        # 优先级：显式传参 > 环境变量 MYAGENT_COMPACT_EXECUTOR > "self"（默认）。
+        # 优先级：显式传参 > 环境变量 CONTEXTFORGE_COMPACT_EXECUTOR > "self"（默认）。
         self.compact_executor = (
-            compact_executor or os.environ.get("MYAGENT_COMPACT_EXECUTOR") or "self"
+            compact_executor or os.environ.get("CONTEXTFORGE_COMPACT_EXECUTOR") or "self"
         ).strip().lower()
         # ── Harness 约束（P4，对照第 8 章三根柱子）──
         # ② 死循环检测：连续 3 次相同 action 就判定鬼打墙、注入换思路提示。
@@ -340,7 +340,7 @@ class Agent:
         复盘"模型这轮说了什么"。默认 None 向后兼容。
         """
         if not _trace_enabled():
-            return  # MYAGENT_TRACE=off：不落盘（屏幕日志仍受 MYAGENT_LOG 独立控制）。
+            return  # CONTEXTFORGE_TRACE=off：不落盘（屏幕日志仍受 CONTEXTFORGE_LOG 独立控制）。
         # 写进当前任务的子目录，turn 是「本任务内」的轮次，跨任务不会撞名。
         path = self.current_task_dir / f"turn_{turn:02d}.json"
         payload = {
@@ -375,7 +375,7 @@ class Agent:
         复用 tools.run_command 执行——同 summarizer 注入思路：ValidationGate 只懂
         「验证的判据」，具体怎么跑命令由这个注入的回调完成，逻辑与副作用分离。
         """
-        from myagent.tools import run_command
+        from contextforge.tools import run_command
         return run_command(command)
 
     def _summarize_via_subagent(self, prompt: str) -> str:

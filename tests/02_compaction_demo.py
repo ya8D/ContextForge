@@ -18,11 +18,11 @@ tests/02_compaction_demo.py —— P3 真实场景演示（不是自动化测试
 import os
 import sys
 
-# 让脚本能 import src/ 下的 myagent 包（T3 起源码收进 src/myagent/）。
+# 让脚本能 import src/ 下的 contextforge 包（T3 起源码收进 src/contextforge/）。
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from myagent.agent import Agent  # noqa: E402
-from myagent.context import COMPACT_THRESHOLD_TOKENS  # noqa: E402
+from contextforge.agent import Agent  # noqa: E402
+from contextforge.context import COMPACT_THRESHOLD_TOKENS  # noqa: E402
 
 # 每个文件的字符数：4.5 万（<5 万截断线，保证整块进历史不被砍）。
 FILE_CHARS = 45_000
