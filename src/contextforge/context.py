@@ -225,3 +225,67 @@ def compact_messages(
         "summary_chars": len(summary),
     }
     return new_messages, stats
+
+
+# 纯 directive 压缩提示词：与 _SUMMARY_PROMPT（叠加四维底线）不同，这条完全听用户的。
+# 用于「轮数不足」降级路径——此时用户是有意识地要按自己的方式压，不强加「必须保留任务
+# 目标/下一步」等底线（保头已护住原始锚点，故这里放手让 directive 说了算）。
+def _build_directive_only_prompt(directive: str) -> str:
+    return (
+        "下面是一个 AI agent 的对话历史片段。请严格按用户的压缩要求处理，"
+        "只输出压缩后的结果正文，不要客套：\n"
+        f"用户的压缩要求：{directive}\n\n以下是历史：\n\n"
+    )
+
+
+def compact_by_directive(
+    messages: list[dict],
+    summarizer,
+    directive: str | None,
+) -> tuple[list[dict], dict] | tuple[list[dict], None]:
+    """「指令驱动压缩」——轮数不足以走结构化压缩时的降级路径（供 compact_now 调用）。
+
+    与 compact_messages 的区别：
+      - 不套「保头 + 压中段 + 保尾 KEEP_RECENT_TURNS(3) 轮」结构，而是
+        **保头(messages[0]) + 保尾最近 1 轮 + 中间纯按 directive 压**。
+      - prompt 不叠加四维基础要求（_SUMMARY_PROMPT），完全按用户 directive（见
+        _build_directive_only_prompt）。
+
+    为什么保头保尾各一：保头护住会话最早的目标锚点（别把 agent 压得忘了要干嘛），
+    保尾 1 轮护住「当前正在做的任务 / 刚发的 /compact 指令本身」。中间才是可压的。
+
+    触发前提：directive 必须非空（没有「用户给的方式」就不该走这条）。且历史要够长到
+    能切出「头 + 中间 >=1 轮 + 尾 1 轮」，否则中间为空、返回 (messages, None) 表示没压。
+    """
+    if not directive or not messages:
+        return messages, None
+
+    head = messages[0]
+    turns = _split_into_turns(messages[1:])
+    # 需要至少 2 轮：末尾留 1 轮、中间至少 1 轮可压。否则没东西可压。
+    if len(turns) < 2:
+        return messages, None
+
+    middle_turns = turns[:-1]
+    recent_turns = turns[-1:]
+    middle_messages = [m for turn in middle_turns for m in turn]
+    if not middle_messages:
+        return messages, None
+
+    middle_text = _render_middle_for_summary(middle_messages)
+    prompt = _build_directive_only_prompt(directive) + middle_text
+    summary = summarizer(prompt)
+
+    marker = f"[前情摘要 · 由 context.py 指令驱动压缩生成，按要求：{directive}]"
+    summary_msg = {"role": "user", "content": f"{marker}\n{summary}"}
+    recent_messages = [m for turn in recent_turns for m in turn]
+    new_messages = [head, summary_msg, *recent_messages]
+
+    stats = {
+        "before_msgs": len(messages),
+        "after_msgs": len(new_messages),
+        "compacted_turns": len(middle_turns),
+        "kept_recent_turns": len(recent_turns),
+        "summary_chars": len(summary),
+    }
+    return new_messages, stats

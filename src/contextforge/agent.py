@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 
 from contextforge.context import (
     COMPACT_THRESHOLD_TOKENS,
+    compact_by_directive,
     compact_messages,
     current_context_tokens,
     should_compact,
@@ -416,7 +417,14 @@ class Agent:
         new_messages, stats = compact_messages(
             self.messages, summarizer=self._pick_summarizer(), directive=directive,
         )
+        if stats is None and directive:
+            # 轮数不足以走结构化压缩，但用户给了明确要求 → 降级为「指令驱动压缩」
+            # （保头 messages[0] + 保尾最近 1 轮 + 中间纯按 directive 压）。
+            new_messages, stats = compact_by_directive(
+                self.messages, summarizer=self._pick_summarizer(), directive=directive,
+            )
         if stats is None:
+            # 裸 /compact（无 directive）轮数不足，或历史短到连 1 轮中间都切不出。
             return "轮数不足以压缩（中段为空），本次未压缩。"
         self.messages = new_messages
         note = f"（按要求：{directive}）" if directive else ""

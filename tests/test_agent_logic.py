@@ -282,11 +282,55 @@ def test_pick_summarizer_switches_by_executor():
 
 
 def test_compact_now_too_few_turns_returns_not_compacted():
-    """主动压缩：轮数不足 → 返回"未压缩"，messages 不变。"""
+    """主动压缩：历史短到连降级路径都压不了（只有头）→ 返回"未压缩"，messages 不变。"""
     a = Agent()
-    a.messages = [{"role": "user", "content": "任务"}]  # 只有头，切不出中段
+    a.messages = [{"role": "user", "content": "任务"}]  # 只有头，切不出任何轮
     before = list(a.messages)
     result = a.compact_now(directive="随便")
+    assert "未压缩" in result
+    assert a.messages == before
+
+
+def _seed_two_turns(a):
+    """给 agent 造「头 + 2 轮」：结构化压缩(keep 3)压不了，但降级路径够压。"""
+    a.messages = [{"role": "user", "content": "原始任务A"}]
+    for i in range(2):
+        a.messages.append({"role": "assistant", "content": [
+            {"type": "tool_use", "id": f"t{i}", "name": "read_file",
+             "input": {"path": f"f{i}.txt"}}]})
+        a.messages.append({"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": f"t{i}", "content": f"内容{i}"}]})
+
+
+def test_compact_now_falls_back_to_directive_when_too_few_turns(monkeypatch):
+    """轮数不足以走结构化压缩、但带了 directive → 降级为指令驱动压缩，真压。"""
+    captured = {}
+
+    def fake_summarize(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return "假摘要"
+
+    a = Agent()
+    monkeypatch.setattr(a, "_summarize", fake_summarize)
+    _seed_two_turns(a)
+    before_len = len(a.messages)
+
+    result = a.compact_now(directive="只保留结论，删掉过程")
+    assert "已压缩" in result
+    assert len(a.messages) < before_len              # 降级路径真的压了
+    assert a.messages[0]["content"] == "原始任务A"    # 保头
+    assert "只保留结论，删掉过程" in captured["prompt"]
+    # 走的是「纯指令」路径，prompt 不应带四维基础要求
+    assert "任务目标是什么" not in captured["prompt"]
+
+
+def test_compact_now_bare_compact_too_few_turns_not_compacted(monkeypatch):
+    """轮数不足 + 裸 /compact（无 directive、无会话级偏好）→ 不触发降级，仍不压。"""
+    a = Agent()  # 无 compact_directive
+    monkeypatch.setattr(a, "_summarize", lambda p: "不该被调到")
+    _seed_two_turns(a)
+    before = list(a.messages)
+    result = a.compact_now()  # 不传 directive
     assert "未压缩" in result
     assert a.messages == before
 
