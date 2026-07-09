@@ -160,7 +160,11 @@ class Agent:
         # ② 死循环检测：连续 3 次相同 action 就判定鬼打墙、注入换思路提示。
         self.loop_detector = LoopDetector(max_same=3)
         # ③ 验证门：若任务配了检查命令（如 pytest），声称完成前强制跑一遍。
-        self.validation_gate = ValidationGate(check_command=check_command)
+        # 优先级：显式传参 > 环境变量 CONTEXTFORGE_CHECK_COMMAND（写 .env 持久生效）> None（跳过）。
+        # 与 compact_directive 读 CONTEXTFORGE_COMPACT_DIRECTIVE 同款兜底。存一份到实例，
+        # 供 CLI /check 查看/复用（门本身的 check_command 是构造时定的只读字段）。
+        self.check_command = check_command or os.environ.get("CONTEXTFORGE_CHECK_COMMAND") or None
+        self.validation_gate = ValidationGate(check_command=self.check_command)
         # 对话历史：TAOR 每一轮的「所见所想所做」都累积在这里。
         self.messages: list[dict] = []
         # 本次会话的 trace 根目录，按时间戳命名（普通脚本可用 datetime.now）。

@@ -16,6 +16,7 @@ cli.py —— ContextForge 的正式 CLI 入口（原 main.py）。
 import sys
 
 from contextforge.agent import Agent
+from contextforge.harness import ValidationGate
 from contextforge.tools import TOOL_SCHEMAS
 
 
@@ -24,6 +25,7 @@ def main() -> int:
     print("=" * 56)
     print("  ContextForge —— 输入任务开始；exit/quit 退出；reset 清空记忆")
     print("  /compact [要求] —— 手动压缩历史（可跟一段话指定保留/删除什么）")
+    print("  /check [命令] —— 设验证门检查命令（如 /check py -m pytest -q）；空=查看，off=清除")
     print(f"  模型：{agent.model}")
     print(f"  可用工具（发给模型的菜单，共 {len(TOOL_SCHEMAS)} 个）：")
     for t in TOOL_SCHEMAS:
@@ -50,6 +52,22 @@ def main() -> int:
         if task.lower() == "/compact" or task.lower().startswith("/compact "):
             directive = task[len("/compact"):].strip() or None
             print(agent.compact_now(directive=directive))
+            continue
+        # 验证门检查命令：/check [命令] 设本会话；空=查看当前；off/none/clear=清除。
+        # 命令存在 Agent 实例上，reset 重建实例即清空、回到环境变量默认。
+        if task.lower() == "/check" or task.lower().startswith("/check "):
+            arg = task[len("/check"):].strip()
+            if not arg:
+                cur = agent.check_command
+                print(f"当前验证门命令：{cur}" if cur else "未配置验证门命令，声称完成时直接放行（跳过验证）。")
+            elif arg.lower() in {"off", "none", "clear"}:
+                agent.check_command = None
+                agent.validation_gate = ValidationGate(check_command=None)
+                print("已清除验证门命令，之后声称完成直接放行。")
+            else:
+                agent.check_command = arg
+                agent.validation_gate = ValidationGate(check_command=arg)
+                print(f"已设验证门命令：{arg}（下个任务声称完成时会强制跑一遍，失败打回）")
             continue
 
         final = agent.run(task)

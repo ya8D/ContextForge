@@ -46,6 +46,7 @@
 | `CONTEXTFORGE_COMPACT_DIRECTIVE` | 一段自然语言 | 无（走默认四维） | 会话级压缩偏好：被动压缩时告诉模型「保什么、删什么」（如「保留所有 Browser 相关报错，其余精简」）。 |
 | `CONTEXTFORGE_COMPACT_THRESHOLD` | 正整数（token） | `500000` | 上下文超过它才自动压缩。Chromium 这类大项目可调高、用满更多上下文再压。非法值兜底回默认。 |
 | `CONTEXTFORGE_COMPACT_EXECUTOR` | `self` / `subagent` | `self` | 压缩执行者：`self` 模型单次总结；`subagent` 派带工具的子 agent 回读文件核实结论后再写摘要。 |
+| `CONTEXTFORGE_CHECK_COMMAND` | 一条 shell 命令 | 无（跳过验证） | 验证门检查命令：模型声称完成前强制跑一遍，输出含 `fail`/`error`/`错误` 视为未过、打回重修。不设则声称完成即放行。也可在 CLI 用 `/check <命令>` 当场设。 |
 
 > CLI 里还有 `/compact [要求]` 命令做**主动压缩**（当场输入的要求即本次压缩偏好），见运行方式。
 
@@ -60,6 +61,8 @@
 - **CLI 交互命令**：`exit`/`quit`/`q` 退出；`reset` 清空记忆开新会话；
   `/compact [要求]` 手动压缩历史（T5-A）——可跟一段话指定保留/删除什么
   （如 `/compact 只保留登录相关报错，其余删掉`），不跟则按默认/会话级偏好压。
+  `/check [命令]` 设本会话验证门检查命令（如 `/check py -m pytest -q`）——声称完成时强制跑、
+  失败打回；空 `/check` 查看当前，`/check off` 清除。reset 会一并清掉，回到环境变量默认。
 - 运行 `tests/` 下的手动演示脚本：`py tests/<脚本名>.py`（脚本内部已把 `src/` 插入
   `sys.path`，可直接跑，无需切目录）。
 - 冒烟测试（验证 API 通路）：`py tests/00_smoke_test.py`

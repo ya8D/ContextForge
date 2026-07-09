@@ -343,6 +343,22 @@
 - **文档**：`.env` 加 `MYAGENT_COMPACT_THRESHOLD` / `MYAGENT_COMPACT_EXECUTOR` 注释示例；
   `CLAUDE.md` 补这两个环境变量说明。
 
+## 验证门用户入口（环境变量 + /check · 承 T6「让机制有变成用户能用」）
+
+- **起因**：更名后重读验证门，发现它和 T6 修过的那批是同类漏——`ValidationGate` 逻辑早已接入 TAOR
+  循环（声称完成→跑检查→失败打回），但 `check_command` **只有构造参数入口**，CLI 两处都是裸
+  `Agent()`。结果：从 `contextforge`/`cf` 跑的用户根本配不了，验证门永远走「未配置→跳过」，形同虚设。
+  compact 三兄弟（directive/threshold/executor）都补过环境入口，唯独 `check_command` 漏了。
+- **① 环境变量入口** `CONTEXTFORGE_CHECK_COMMAND`：`Agent.__init__` 加兜底「显式 > 环境 > None」，
+  与 `compact_directive` 同款。解析后存一份到 `self.check_command`（供 CLI 查看/复用），再建门。
+- **② CLI `/check` 命令**：`/check <命令>` 当场设、空 `/check` 查看、`/check off` 清除。设/清都
+  **重建 `ValidationGate`**（门的 check_command 是构造时定的只读字段，不给 harness 加 setter）。
+  命令存在 Agent 实例上，`reset` 重建实例即清空、回到环境变量默认——语义一致（reset = 彻底重来）。
+- **测试**：`test_agent_logic.py` +3（环境兜底且同步进门、显式覆盖环境、默认 None 时门无条件放行）。
+- **验证**：`py -m pytest -m "not e2e"` 85 绿（原 82 + 3，无回归）；环境变量入口实测
+  `check_command` 与门内值一致；CLI `/check` 设/查/清四步交互全通、`reset` 清掉确认。
+- **文档**：`.env` 加注释示例；`CLAUDE.md` 环境变量表 + CLI 命令段补 `/check`；`README.md` 会话内命令补一行。
+
 ## P0 明细
 
 - [x] 建 `C:\AI_learning\myagent`（与学习仓库平级）

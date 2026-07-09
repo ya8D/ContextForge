@@ -174,6 +174,33 @@ def test_explicit_compact_directive_overrides_env(monkeypatch):
     assert a.compact_directive == "显式偏好"
 
 
+# ── 验证门检查命令：显式 > CONTEXTFORGE_CHECK_COMMAND > None（跳过）──
+
+def test_check_command_reads_env_fallback(monkeypatch):
+    """验证门命令可从环境变量 CONTEXTFORGE_CHECK_COMMAND 兜底，且同步进门。"""
+    monkeypatch.setenv("CONTEXTFORGE_CHECK_COMMAND", "py -m pytest -q")
+    a = Agent()  # 不显式传参
+    assert a.check_command == "py -m pytest -q"
+    assert a.validation_gate.check_command == "py -m pytest -q"
+
+
+def test_explicit_check_command_overrides_env(monkeypatch):
+    """显式传参优先级高于环境变量（同 compact_directive 的兜底语义）。"""
+    monkeypatch.setenv("CONTEXTFORGE_CHECK_COMMAND", "环境命令")
+    a = Agent(check_command="py -m pytest tests/test_x.py")
+    assert a.check_command == "py -m pytest tests/test_x.py"
+    assert a.validation_gate.check_command == "py -m pytest tests/test_x.py"
+
+
+def test_check_command_default_none_skips_gate(monkeypatch):
+    """不传不设环境 → check_command 为 None，验证门无条件放行（不添乱）。"""
+    monkeypatch.delenv("CONTEXTFORGE_CHECK_COMMAND", raising=False)
+    a = Agent()
+    assert a.check_command is None
+    passed, _ = a.validation_gate.verify(lambda cmd: "")  # runner 不会被调到
+    assert passed is True
+
+
 # ── 压缩触发阈值：显式 > CONTEXTFORGE_COMPACT_THRESHOLD > 默认（支撑 Chromium 大上下文）──
 
 def test_compact_threshold_default(monkeypatch):
