@@ -54,6 +54,18 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
 - **验证**：`not e2e` 99 绿（原 92 + 7）；实证——两 Agent 的 read_files 互不含、schema 只有 `path`；
   连续创建的多个实例 trace 后缀单调序号（0000/0001/…）全不撞（`id(self)` 方案被测试当场证伪后改此）；
   坏参数返回「参数不对」不崩。
+- **审查后补修（对这批修复做了 8 角度 code review，揪出两处未到位）**：
+  - **#4 脏历史**：原修复只让 CLI「不退出」，但 `run()` 抛异常时 `self.messages` 已 append 了本次
+    user 任务、无 assistant 应答——下个任务再 append 就成两条连续 user，污染对话（实测复现）。补修：
+    `run()` 拆出 `_run_loop()`，外层 `try/except` 在失败时 `del self.messages[本任务起点:]` 回滚，
+    保证「失败=本任务如同没发生」。加测试 `test_run_rolls_back_messages_on_failure`（mock API 抛错，
+    断言历史干净、无连续 user）。
+  - **#1 只修了一半**：`_DEFAULT_READ_FILES` 兜底集合仍是模块全局——直接调 read_file/write_file
+    不传 `_read_files` 时走它，旧的跨调用累积 bug 原样保留，且一个测试仍靠它的副作用串味（注释还
+    引用已删的 `READ_FILES`）。收尾：**删掉 `_DEFAULT_READ_FILES`**，`_read_files=None` 时改用
+    **一次性空集合**（不跨调用累积）；三个直调测试改为显式传各自的 `set()`。模块全局彻底根除。
+  - 已确认无需改的：#2 itertools.count（GIL 下 `next` 原子，实测 8000 并发无撞）、#5 loop reset
+    位置正确、子 agent 隔离链路端到端成立。#3（TypeError 捕获偏宽）本轮用户未选，留待日后。
 
 ## 学习笔记（docs/ 下 9 篇主题式 + 导览）
 

@@ -86,11 +86,12 @@ def tool(param_desc: dict | None = None):
 # 1. 工具函数：真正干活的「手」（加 @tool 即自动注册 + 生成 schema）
 # ─────────────────────────────────────────────────────────────
 
-# 「本会话读过哪些文件」的默认兜底集合，供 write_file 的「先读再改」约束检查。
-# ⚠️ 正式路径下，这个状态是 **Agent 实例状态**（agent.py 的 self.read_files），由 execute_tool
-# 带外注入给工具的 _read_files 参数——每个 Agent（含子 agent）各有一套，天然隔离、reset 即清空。
-# 这里的模块级集合只是「脱离 Agent、直接调 read_file/write_file 时」的兜底（如单测直接调）。
-_DEFAULT_READ_FILES: set = set()
+# 「本会话读过哪些文件」的状态供 write_file 的「先读再改」约束检查。
+# ⚠️ 这个状态是 **Agent 实例状态**（agent.py 的 self.read_files），由 execute_tool 带外注入给
+# 工具的 _read_files 参数——每个 Agent（含子 agent）各有一套，天然隔离、reset 即清空。
+# 不用模块级全局集合：那会被所有调用共享、进程内长存累积，正是要消灭的 bug。
+# 若脱离 Agent 直接调工具（如单测）而不传 _read_files，则每次调用用一个**一次性空集合**
+# （读了就登记进它、调用返回即丢），不跨调用累积、不污染——想让 read+write 共享状态就显式传同一个集合。
 
 
 @tool({"path": "文件路径，可以是相对或绝对路径"})
@@ -98,8 +99,8 @@ def read_file(path: str, _read_files: set | None = None) -> str:
     """读取一个文本文件的完整内容。当你需要查看某个文件写了什么时使用。"""
     # 错误不抛异常，而是返回可读字符串 —— 这样错误会进入模型上下文，
     # 模型能据此自我纠正（第 3.2 节「让 LLM 自己解决问题」）。
-    # _read_files 是带外注入的实例集合（不进 schema）；None 时回退到模块级默认兜底。
-    read_files = _read_files if _read_files is not None else _DEFAULT_READ_FILES
+    # _read_files 是带外注入的实例集合（不进 schema）；None 时用一次性空集合（不跨调用累积）。
+    read_files = _read_files if _read_files is not None else set()
     try:
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -141,9 +142,9 @@ def write_file(path: str, content: str, _read_files: set | None = None) -> str:
     # 「先读再改」硬约束（对照 Claude Code 第 15.2 节 FileEditTool）：
     # 没读过的已存在文件，禁止写 —— 防止模型基于「想象的内容」盲目覆盖。
     # 这是本项目第一个真正的 harness 约束：用代码强制，不靠模型自律。
-    # _read_files 是带外注入的实例集合（不进 schema）；None 时回退到模块级默认兜底。
+    # _read_files 是带外注入的实例集合（不进 schema）；None 时用一次性空集合（不跨调用累积）。
     import os
-    read_files = _read_files if _read_files is not None else _DEFAULT_READ_FILES
+    read_files = _read_files if _read_files is not None else set()
     norm = _norm(path)
     if os.path.exists(path) and norm not in read_files:
         return (f"[拒绝] 文件已存在但你还没读过它：{path}。"

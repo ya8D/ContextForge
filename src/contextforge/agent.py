@@ -210,9 +210,23 @@ class Agent:
         _log("\n🎯 [任务]", task)
         if _trace_enabled():
             _log("📁 [trace]", f"本任务 in/out 落盘到 {self.current_task_dir}")
-        # 用户任务作为历史的第一条消息。
+        # 用户任务作为历史的第一条消息。记住 append 前的长度：一旦本任务中途抛异常
+        # （API 抖动/限流等），把 self.messages 截回这里——否则会留下一条「有 user 问、无 assistant 答」
+        # 的悬挂消息，下个任务再 append 就变成两条连续 user，污染后续对话（甚至若异常发生在压缩后、
+        # 中段已被改写，历史结构会坏）。回滚保证「失败=本任务如同没发生过」，会话历史保持干净可续。
+        _msgs_before = len(self.messages)
         self.messages.append({"role": "user", "content": task})
 
+        try:
+            return self._run_loop()
+        except Exception:
+            # 回滚本任务追加的一切（悬挂 user + 已产生的中间轮），保持历史干净，再把异常抛给上层
+            # （CLI 会兜住、提示可重试）。用 del 原地截断，不换 list 对象（引用语义与别处一致）。
+            del self.messages[_msgs_before:]
+            raise
+
+    def _run_loop(self) -> str:
+        """TAOR 主循环本体（从 run() 抽出，便于 run() 在外层统一做失败回滚）。"""
         for i in range(1, self.max_iterations + 1):
             _log(f"\n🔄 ===== TAOR 第 {i}/{self.max_iterations} 轮 =====", "")
 

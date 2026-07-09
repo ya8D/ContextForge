@@ -75,9 +75,9 @@ def test_read_missing_file_returns_error_not_raise(tmp_path):
 def test_read_registers_in_read_files(tmp_path):
     f = tmp_path / "reg.txt"
     f.write_text("x", encoding="utf-8")
-    tools._DEFAULT_READ_FILES.discard(_norm(str(f)))  # 先确保没登记
-    read_file(str(f))
-    assert _norm(str(f)) in tools._DEFAULT_READ_FILES  # 读后应被登记（默认兜底集合）
+    rf: set = set()                       # 显式传入自己的集合（不靠模块全局）
+    read_file(str(f), _read_files=rf)
+    assert _norm(str(f)) in rf            # 读后应被登记进这个集合
 
 
 # ── write_file 的「先读再改」硬约束（重点）────────────────────
@@ -85,8 +85,8 @@ def test_read_registers_in_read_files(tmp_path):
 def test_write_existing_file_without_reading_is_rejected(tmp_path):
     f = tmp_path / "exist.txt"
     f.write_text("原内容", encoding="utf-8")
-    tools._DEFAULT_READ_FILES.discard(_norm(str(f)))  # 确保「没读过」
-    result = write_file(str(f), "新内容")
+    rf: set = set()                       # 空集合 = 没读过任何文件
+    result = write_file(str(f), "新内容", _read_files=rf)
     assert result.startswith("[拒绝]")
     assert f.read_text(encoding="utf-8") == "原内容"  # 文件未被改动
 
@@ -94,8 +94,9 @@ def test_write_existing_file_without_reading_is_rejected(tmp_path):
 def test_write_after_reading_succeeds(tmp_path):
     f = tmp_path / "exist2.txt"
     f.write_text("原内容", encoding="utf-8")
-    read_file(str(f))                       # 先读（登记进 READ_FILES）
-    result = write_file(str(f), "新内容")
+    rf: set = set()
+    read_file(str(f), _read_files=rf)              # 先读（登记进 rf）
+    result = write_file(str(f), "新内容", _read_files=rf)  # 同一个集合 → 放行
     assert result.startswith("[成功]")
     assert f.read_text(encoding="utf-8") == "新内容"
 

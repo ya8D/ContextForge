@@ -409,3 +409,22 @@ def test_loop_detector_per_instance_and_resettable():
     a.loop_detector._recent.extend(["x", "x", "x"])
     a.loop_detector.reset()                        # run() 开头调的就是它
     assert a.loop_detector._recent == []           # 清零后不残留上个任务的指纹
+
+
+def test_run_rolls_back_messages_on_failure():
+    """run() 中途抛异常 → 回滚本任务追加的消息，不留悬挂 user，避免污染下个任务。"""
+    import unittest.mock as mock
+    a = Agent()
+    a.messages = [{"role": "user", "content": "旧任务"},
+                  {"role": "assistant", "content": "旧回复"}]  # 已有干净历史
+    before = list(a.messages)
+    # 第一轮 API 就抛 → 本任务应整体回滚
+    with mock.patch.object(a.client.messages, "create", side_effect=RuntimeError("模拟API抖动")):
+        try:
+            a.run("会失败的任务")
+        except RuntimeError:
+            pass
+    assert a.messages == before                    # 悬挂的 user「会失败的任务」已被回滚，历史干净
+    # 连续两条 user 不该出现
+    assert not any(a.messages[i]["role"] == "user" and a.messages[i + 1]["role"] == "user"
+                   for i in range(len(a.messages) - 1))
