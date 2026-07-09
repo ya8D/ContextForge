@@ -26,6 +26,8 @@
 - **决策交给模型，执行和约束留给代码**：子 agent 是「一个工具」，何时派由模型判断。
 - **可观测**：TAOR 每轮打印 Think / Act / Observe，并把 in/out 落盘到 `traces/`（已 gitignore）。
 
+> 📌 想看这个项目**哪里特别、为什么这么设计**（都是实地验证过/踩过的亮点），见 [HIGHLIGHTS.md](./HIGHLIGHTS.md)。
+
 ## 目录
 
 ```
@@ -37,6 +39,7 @@ src/myagent/
   harness.py   # 权限拦截 + 死循环检测 + 验证门（P4）
   cli.py       # 交互式 CLI 入口（原 main.py，T3 标准包布局后改名）
 tests/         # pytest：纯逻辑（不烧钱）+ 端到端（真调 API，标 @pytest.mark.e2e）
+HIGHLIGHTS.md  # 设计亮点速览（哪里特别 / 为什么这么设计，都验证过）
 PROGRESS.md    # 逐阶段的详细开发记录（含每个决策的「为什么」）
 CLAUDE.md      # 项目稳定约定（选型 / 语言 / 运行方式）
 ```

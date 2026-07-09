@@ -38,6 +38,25 @@ def test_dangerous_commands_blocked():
         assert ok is False, f"危险命令未被拦：{cmd}"
 
 
+def test_git_destructive_commands_blocked():
+    """会丢失 git 未提交工作的命令都被拦（真实事故驱动：AI 曾 reset 掉半天工作）。"""
+    for cmd in ["git reset --hard", "git reset --hard HEAD~3",
+                "git checkout -- .", "git checkout .",
+                "git clean -fd", "git clean -xfd",
+                "git push --force origin main", "git push -f"]:
+        ok, reason = check_command_safety(cmd)
+        assert ok is False, f"危险 git 命令未被拦：{cmd}"
+
+
+def test_safe_git_commands_allowed():
+    """安全的 git 用法不被误伤（切分支/查看状态/正常提交推送等）。"""
+    for cmd in ["git status", "git checkout my-branch", "git checkout -b feat",
+                "git commit -m 'x'", "git push", "git push origin main",
+                "git reset HEAD foo.py", "git clean -n"]:
+        ok, _ = check_command_safety(cmd)
+        assert ok is True, f"安全 git 命令被误拦：{cmd}"
+
+
 def test_safe_commands_allowed():
     """常见安全命令放行（返回 True）。"""
     for cmd in ["ls -la", "echo hello", "cat foo.txt", "python script.py",

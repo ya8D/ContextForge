@@ -15,6 +15,7 @@
 - [x] **T2 快速启动（console_scripts 入口，`myagent` 命令）**
 - [x] **T1 log 开关（MYAGENT_LOG 分级 + MYAGENT_TRACE 独立开关）**
 - [x] **T5-A 客制化 compact（压缩偏好可注入 + 压缩执行者可切换 + /compact 主动压缩）**
+- [x] **T6 简历前缺口补齐（compact 阈值/执行者环境入口 + 危险 git 命令拦截）**
 - [ ] P6（可选）结构化输出 & 跨会话 Memory
 
 ## P2 明细
@@ -313,6 +314,30 @@
   摘要里写"（已回读 …核实，当前仍成立）"——这正是子 agent 相对盲总结的增量价值（能核实，非凭记忆）。
 - **向后兼容**：不传任何 T5-A 参数时，`compact_directive=None` + `compact_executor="self"`，
   prompt 逐字等于 P3、执行者就是原 `_summarize`，行为与 P3 完全一致。
+
+## T6 明细（简历前缺口补齐 · 让「机制有」变成「用户能用」）
+
+- **起因**：为写简历逐条核对代码，发现几处「机制实现了、但用户/运行时入口没接全」——
+  写进简历要经得起面试追问「怎么操作/怎么触发」，故先补齐。
+- **① 压缩触发阈值加环境入口**：`compact_threshold` 之前只是构造参数，从 CLI 起的 agent 调不了。
+  新增 `_resolve_compact_threshold`：优先级「显式传参 > `MYAGENT_COMPACT_THRESHOLD` > 默认 500K」，
+  非法值（非正整数）兜底回默认不报错。Chromium 这类大项目可调高阈值、用满更多上下文再压。
+- **② 压缩执行者加环境入口**：`compact_executor` 同样只能构造传参，CLI 切不到「子 agent 回读核实」。
+  加环境兜底 `MYAGENT_COMPACT_EXECUTOR`（self/subagent），优先级「显式 > 环境 > self」——
+  现在写 `.env` 一行就能让被动压缩走子 agent 核实，真正成为「用户可选操作」。
+- **③ 危险命令拦截补 git 丢工作类**（真实事故驱动：AI 曾把 git 整个 reset、丢了半天工作）：
+  `_DANGEROUS_COMMAND_PATTERNS` 新增 `git reset --hard` / `git checkout -- .` / `git checkout .` /
+  `git clean -f` / `git push --force` 等模式。刻意只拦「会丢工作」的形态，不误伤安全用法——
+  `git checkout <分支名>`（切分支）、`git reset HEAD foo`（unstage）、`git clean -n`（dry-run）均放行。
+- **未做的一项（明确决定不做）**：T6 原列的「偷删测试检测接线」——因简历已决定**不写**这条
+  （要完全真实），故 `check_test_deletion` 保持现状（有函数有单测、未接进运行时），不强行接线。
+- **测试**：`test_harness.py` +2（危险 git 命令全拦、安全 git 用法不误伤）；`test_agent_logic.py` +6
+  （阈值默认/环境/显式覆盖/非法值兜底、执行者环境/显式覆盖）。
+- **验证**：`py -m pytest -m "not e2e"` 81 绿（原 73 + 8，无回归）；代码层实证 harness 硬拦 4 个
+  危险 git 命令、放行 4 个安全 git 用法——「用代码强制、不靠模型自觉」（模型碰巧自己拒了也不算数，
+  harness 那道关照挡）。
+- **文档**：`.env` 加 `MYAGENT_COMPACT_THRESHOLD` / `MYAGENT_COMPACT_EXECUTOR` 注释示例；
+  `CLAUDE.md` 补这两个环境变量说明。
 
 ## P0 明细
 

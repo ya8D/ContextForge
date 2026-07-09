@@ -75,6 +75,25 @@ def _trace_enabled() -> bool:
     return os.environ.get("MYAGENT_TRACE", "on").strip().lower() != "off"
 
 
+def _resolve_compact_threshold(explicit: int | None) -> int:
+    """解析压缩触发阈值。优先级：显式传参 > MYAGENT_COMPACT_THRESHOLD > 默认 500K。
+
+    环境变量非法（非正整数）时兜底回默认，不报错——配置写错不该让 agent 起不来。
+    Chromium 这类大项目可把阈值调高，用满更多上下文再触发压缩。
+    """
+    if explicit is not None:
+        return explicit
+    raw = os.environ.get("MYAGENT_COMPACT_THRESHOLD")
+    if raw:
+        try:
+            val = int(raw.strip())
+            if val > 0:
+                return val
+        except ValueError:
+            pass  # 非法值兜底回默认
+    return COMPACT_THRESHOLD_TOKENS
+
+
 def _to_serializable(obj):
     """把 messages 里的内容转成可 JSON 序列化的形式。
 
@@ -109,20 +128,21 @@ class Agent:
     """最小 TAOR agent：一个循环 + 一组工具 + 一段对话历史。"""
 
     def __init__(self, model: str | None = None, max_iterations: int = 100,
-                 compact_threshold: int = COMPACT_THRESHOLD_TOKENS,
+                 compact_threshold: int | None = None,
                  check_command: str | None = None,
                  tools: list | None = None,
                  compact_directive: str | None = None,
-                 compact_executor: str = "self"):
+                 compact_executor: str | None = None):
         # 模型 ID 从环境读，不写死（见 CLAUDE.md）。
         self.model = model or os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8[1m]")
         # SDK 自动读取 ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL。
         self.client = anthropic.Anthropic()
         # 硬护栏：循环最多转几轮，防止失控无限循环烧 token（第 1.3 节 护栏）。
         self.max_iterations = max_iterations
-        # 上下文压缩阈值（真实 token）。默认 500K（见 context.py），
+        # 上下文压缩阈值（真实 token）。优先级：显式传参 > 环境变量 MYAGENT_COMPACT_THRESHOLD
+        # （写 .env 持久生效，Chromium 这类大项目可调高以用满更多上下文再压）> 默认 500K。
         # 测试可传小值以便低成本触发压缩、验证「压缩链真的通」而不必真塞 500K。
-        self.compact_threshold = compact_threshold
+        self.compact_threshold = _resolve_compact_threshold(compact_threshold)
         # 可用工具集（P5 上下文隔离用）。默认 None = 用全局全集 TOOL_SCHEMAS（主 agent）。
         # 子 agent 会被传入一个**受限子集**（不含 spawn_subagent），防止无限递归派生。
         self.tool_schemas = tools if tools is not None else TOOL_SCHEMAS
@@ -131,9 +151,11 @@ class Agent:
         # 优先级：显式传参 > 环境变量 MYAGENT_COMPACT_DIRECTIVE（写 .env 持久生效）> None（默认四维）。
         # 与 self.model 读 ANTHROPIC_MODEL 同款兜底思路，无需给 CLI 加新命令。
         self.compact_directive = compact_directive or os.environ.get("MYAGENT_COMPACT_DIRECTIVE") or None
-        # 压缩执行者："self"（默认，_summarize 盲总结，与 P3 一致）或 "subagent"
-        # （派带工具的子 agent 去压，能回读文件核实）。
-        self.compact_executor = compact_executor
+        # 压缩执行者："self"（默认，_summarize 盲总结）或 "subagent"（派带工具的子 agent 回读核实）。
+        # 优先级：显式传参 > 环境变量 MYAGENT_COMPACT_EXECUTOR > "self"（默认）。
+        self.compact_executor = (
+            compact_executor or os.environ.get("MYAGENT_COMPACT_EXECUTOR") or "self"
+        ).strip().lower()
         # ── Harness 约束（P4，对照第 8 章三根柱子）──
         # ② 死循环检测：连续 3 次相同 action 就判定鬼打墙、注入换思路提示。
         self.loop_detector = LoopDetector(max_same=3)

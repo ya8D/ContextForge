@@ -46,7 +46,7 @@ TOOL_PERMISSIONS = {
 }
 
 
-# 危险命令模式：正则匹配到就拦截。覆盖「删除 / 格式化 / 关机 / 覆盖系统文件」等不可逆操作。
+# 危险命令模式：正则匹配到就拦截。覆盖「删除 / 格式化 / 关机 / 覆盖系统文件 / 丢失 git 未提交工作」等不可逆操作。
 # 教学项目，宁可拦得严一点（宁可误拦让用户放行，也不要漏掉一个 rm -rf）。
 _DANGEROUS_COMMAND_PATTERNS = [
     (r"\brm\s+-[rf]", "rm -r/-f 递归或强制删除"),
@@ -60,6 +60,15 @@ _DANGEROUS_COMMAND_PATTERNS = [
     (r"\breboot\b", "reboot 重启"),
     (r">\s*/dev/sd", "直写块设备"),
     (r"\bchmod\s+-r\s+777", "chmod -R 777 危险提权"),
+    # ── 会丢失 git 未提交工作的命令（真实事故：AI 曾 reset 掉半天工作）──
+    # 只拦「会丢工作」的危险形态，不误伤安全用法（如 git checkout <分支名> 切分支是安全的）。
+    (r"\bgit\s+reset\s+--hard", "git reset --hard 丢弃未提交改动"),
+    (r"\bgit\s+checkout\s+--\s+\.", "git checkout -- . 丢弃工作区改动"),
+    (r"\bgit\s+checkout\s+\.(\s|$)", "git checkout . 丢弃工作区改动"),
+    (r"\bgit\s+clean\s+-[a-z]*f", "git clean -f 删除未跟踪文件"),
+    (r"\bgit\s+restore\s+--staged\s+--worktree", "git restore 覆盖工作区"),
+    (r"\bgit\s+push\s+.*--force\b", "git push --force 覆盖远端历史"),
+    (r"\bgit\s+push\s+.*-f\b", "git push -f 覆盖远端历史"),
 ]
 
 # 禁止触碰的系统目录前缀（路径遍历 / 写系统目录防护）。

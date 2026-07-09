@@ -37,6 +37,19 @@
 - **持久默认**：写进 `myagent/.env`（已 gitignore，`load_dotenv` 自动加载）一行，比如
   `MYAGENT_LOG=debug`，之后每次敲 `myagent` 都生效，无需再加前缀。
 
+## 压缩相关环境变量（T5-A / T6）
+
+均可写进 `.env` 持久生效；显式构造参数 `Agent(...)` 优先级更高，会覆盖环境变量。
+
+| 变量 | 取值 | 默认 | 作用 |
+|---|---|---|---|
+| `MYAGENT_COMPACT_DIRECTIVE` | 一段自然语言 | 无（走默认四维） | 会话级压缩偏好：被动压缩时告诉模型「保什么、删什么」（如「保留所有 Browser 相关报错，其余精简」）。 |
+| `MYAGENT_COMPACT_THRESHOLD` | 正整数（token） | `500000` | 上下文超过它才自动压缩。Chromium 这类大项目可调高、用满更多上下文再压。非法值兜底回默认。 |
+| `MYAGENT_COMPACT_EXECUTOR` | `self` / `subagent` | `self` | 压缩执行者：`self` 模型单次总结；`subagent` 派带工具的子 agent 回读文件核实结论后再写摘要。 |
+
+> CLI 里还有 `/compact [要求]` 命令做**主动压缩**（当场输入的要求即本次压缩偏好），见运行方式。
+
+
 ## 运行方式
 
 - Python：**系统 Python 3.11**，用 `py` 启动器调用（bash 里 `python` / `python3` 不通）。

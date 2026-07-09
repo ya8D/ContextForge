@@ -147,10 +147,11 @@ def test_dump_turn_records_response_content(monkeypatch, tmp_path):
 def test_agent_stores_compact_directive_and_executor_defaults(monkeypatch):
     """会话级偏好存住；执行者默认 self、可设 subagent。
 
-    显式 delenv 保证不受 .env / 环境里 MYAGENT_COMPACT_DIRECTIVE 干扰（该变量是新增的
-    环境兜底来源，见 test_compact_directive_reads_env_fallback）。
+    显式 delenv 保证不受 .env / 环境里的 compact 相关变量干扰（它们是新增的环境兜底来源）。
     """
     monkeypatch.delenv("MYAGENT_COMPACT_DIRECTIVE", raising=False)
+    monkeypatch.delenv("MYAGENT_COMPACT_EXECUTOR", raising=False)
+    monkeypatch.delenv("MYAGENT_COMPACT_THRESHOLD", raising=False)
     a = Agent()
     assert a.compact_directive is None
     assert a.compact_executor == "self"
@@ -171,6 +172,49 @@ def test_explicit_compact_directive_overrides_env(monkeypatch):
     monkeypatch.setenv("MYAGENT_COMPACT_DIRECTIVE", "环境偏好")
     a = Agent(compact_directive="显式偏好")
     assert a.compact_directive == "显式偏好"
+
+
+# ── 压缩触发阈值：显式 > MYAGENT_COMPACT_THRESHOLD > 默认（支撑 Chromium 大上下文）──
+
+def test_compact_threshold_default(monkeypatch):
+    """不传不设环境 → 用默认 500K。"""
+    from myagent.context import COMPACT_THRESHOLD_TOKENS
+    monkeypatch.delenv("MYAGENT_COMPACT_THRESHOLD", raising=False)
+    assert Agent().compact_threshold == COMPACT_THRESHOLD_TOKENS
+
+
+def test_compact_threshold_reads_env(monkeypatch):
+    """MYAGENT_COMPACT_THRESHOLD 环境兜底：调高阈值让大项目用满更多上下文再压。"""
+    monkeypatch.setenv("MYAGENT_COMPACT_THRESHOLD", "800000")
+    assert Agent().compact_threshold == 800_000
+
+
+def test_explicit_compact_threshold_overrides_env(monkeypatch):
+    """显式传参优先于环境变量。"""
+    monkeypatch.setenv("MYAGENT_COMPACT_THRESHOLD", "800000")
+    assert Agent(compact_threshold=1234).compact_threshold == 1234
+
+
+def test_compact_threshold_invalid_env_falls_back(monkeypatch):
+    """环境变量非法（非正整数）→ 兜底回默认，不报错。"""
+    from myagent.context import COMPACT_THRESHOLD_TOKENS
+    for bad in ["abc", "-5", "0", ""]:
+        monkeypatch.setenv("MYAGENT_COMPACT_THRESHOLD", bad)
+        assert Agent().compact_threshold == COMPACT_THRESHOLD_TOKENS
+
+
+# ── 压缩执行者：显式 > MYAGENT_COMPACT_EXECUTOR > "self"（让子 agent 核实成为可选操作）──
+
+def test_compact_executor_reads_env(monkeypatch):
+    """MYAGENT_COMPACT_EXECUTOR 环境兜底：从命令行也能切到子 agent 回读核实。"""
+    monkeypatch.setenv("MYAGENT_COMPACT_EXECUTOR", "subagent")
+    assert Agent().compact_executor == "subagent"
+
+
+def test_explicit_compact_executor_overrides_env(monkeypatch):
+    """显式传参优先于环境变量。"""
+    monkeypatch.setenv("MYAGENT_COMPACT_EXECUTOR", "subagent")
+    assert Agent(compact_executor="self").compact_executor == "self"
 
 
 def test_pick_summarizer_switches_by_executor():
