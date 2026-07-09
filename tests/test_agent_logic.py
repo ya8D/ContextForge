@@ -383,3 +383,29 @@ def test_compact_now_falls_back_to_session_directive(monkeypatch):
 
     a.compact_now()  # 不传 directive
     assert "会话级要求ABC" in captured["prompt"]
+
+
+# ── 架构修正：实例状态隔离 / trace 防撞名 / 循环检测每任务清零 ──
+
+def test_each_agent_has_independent_read_files():
+    """read_files 是**实例状态**：两个 Agent（含子 agent 场景）各一套，互不共享。"""
+    a, b = Agent(), Agent()
+    assert a.read_files == set() and b.read_files == set()
+    a.read_files.add("/some/path.txt")
+    assert "/some/path.txt" not in b.read_files   # b 不受 a 影响 → 隔离
+    assert a.read_files is not b.read_files        # 不是同一个对象（更不是模块全局）
+
+
+def test_trace_dir_unique_per_instance():
+    """同秒并行创建的多个 Agent，trace 目录靠末尾短 id 区分，不撞名（否则子 agent 覆盖彼此 trace）。"""
+    dirs = {str(Agent().trace_dir) for _ in range(5)}
+    assert len(dirs) == 5                          # 5 个实例 5 个不同目录
+
+
+def test_loop_detector_per_instance_and_resettable():
+    """死循环检测器是实例状态、可清零（run() 每任务开头会 reset，避免跨任务指纹串味）。"""
+    a, b = Agent(), Agent()
+    assert a.loop_detector is not b.loop_detector  # 各自独立
+    a.loop_detector._recent.extend(["x", "x", "x"])
+    a.loop_detector.reset()                        # run() 开头调的就是它
+    assert a.loop_detector._recent == []           # 清零后不残留上个任务的指纹

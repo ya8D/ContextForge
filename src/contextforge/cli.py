@@ -70,7 +70,17 @@ def main() -> int:
                 print(f"已设验证门命令：{arg}（下个任务声称完成时会强制跑一遍，失败打回）")
             continue
 
-        final = agent.run(task)
+        # 兜住单次任务的运行异常（API 网络抖动 / 限流 / 模型给了工具坏参数等）：
+        # 打印可读错误后回到输入循环，**不退出、不丢会话历史**（self.messages 还在，可重试/接着问）。
+        # 不吞 KeyboardInterrupt —— 让 Ctrl+C 仍能中断退出。
+        try:
+            final = agent.run(task)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:  # noqa: BLE001
+            print(f"\n[本次任务失败] {type(e).__name__}: {e}")
+            print("（会话历史已保留，可重试、换个问法，或输入 reset 开新会话。）")
+            continue
         print("\n" + "=" * 56)
         print("最终答案：", final)
 

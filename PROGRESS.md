@@ -19,6 +19,42 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
 
 ---
 
+## 修 5 个真 bug（全局状态泄漏 / 并发 / 健壮性）+ 坦白设计缺口
+
+一份架构级 code review 揪出 12 个问题，逐条核对代码全部属实。修掉 5 个真 bug，各留说明；
+#7-#12 是设计权衡，见文末「已知设计权衡 / 缺口」节。
+
+- **#1 READ_FILES 从模块全局收进 Agent 实例**（最严重）：原 `tools.READ_FILES` 是模块级 set、被
+  所有 Agent 共享——① reset（新建实例）清不掉它，「先读再改」约束被击穿；② 子 agent 与主 agent
+  共享，破坏「两个独立 list 天然隔离」的宣称（messages 隔离了但它没有）；③ 并行执行时并发写竞态。
+  **修法（调研了业界做法）**：Claude Agent SDK 用「闭包工厂」（工具是捕获 self 的闭包）、Pydantic AI
+  用 `RunContext[Deps]` 依赖注入。闭包工厂要把工具注册表全移进实例、每个 Agent 重注册，**会推翻
+  现有模块级自动注册表**（docs/07、08 讲的「放对层」成果），对 4 个工具的学习项目过重。故采用
+  **带外参数注入**（思想同 RunContext、更轻）：`@tool` 装饰器跳过下划线前缀参数（不进 schema、
+  模型看不到）；`read_file`/`write_file` 加 `_read_files` 参；`execute_tool(name, input, read_files)`
+  仅对签名含 `_read_files` 的工具注入；`Agent` 加 `self.read_files=set()`，并行 lambda 传它。
+  模块级 `READ_FILES` 降为 `_DEFAULT_READ_FILES` 兜底（脱离 Agent 直接调工具时用）。子 agent/reset/
+  并发三个问题一次解决。
+- **#2 子 agent trace 目录撞名覆盖**：`run_时分秒` 秒级无唯一标识，一轮里并行派生的多个子 agent
+  同一秒创建 → 同一 `run_HHMMSS/` → 各自 task_01 互相覆盖、静默丢 trace。修：加**进程内单调序号**
+  后缀 `run_时分秒_序号`。（一开始试过 `id(self)` 低位 hex，但短生命周期实例被回收后 id 会被复用、
+  连续创建时仍撞——实测 5 个实例常只剩 1-2 个唯一。改用 `itertools.count()` 单调序号，进程内绝不重复、
+  零随机性，符合项目「不用 random/uuid」风格。这是本次一个被测试当场抓出的方案缺陷。）
+- **#3 execute_tool 兜坏参数**：`func(**tool_input)` 无 try，模型幻觉出错误参数名 → TypeError 穿透
+  `pool.map` → 崩整个 run。修：包 try，参数绑定 TypeError / 其它异常都兜成可读错误串，进模型上下文
+  自我纠正而非崩溃。
+- **#4 CLI 兜运行异常**：`agent.run(task)` 外层无 try，单次 API 抖动/限流就带 traceback 退出、丢
+  全部会话历史。修：包 try/except（不吞 KeyboardInterrupt），报错后回到输入循环、保留 self.messages。
+- **#5 loop_detector 每任务清零**：检测器跨 run 复用但 run() 开头不清空，任务2 头几轮指纹和任务1
+  结尾混在同一滑动窗口，可能误/漏判。修：run() 开头 `loop_detector.reset()`（死循环是任务内概念，
+  区别于有意跨任务保留的 messages/validation_gate 短期记忆）。
+- **测试**：`test_tools.py` +4（_read_files 不进 schema、注入集合隔离、execute_tool 注入、坏参数
+  返回可读错误不抛）；`test_agent_logic.py` +3（read_files 每实例独立、trace 目录唯一、loop_detector
+  每实例独立可清零）。现有 4 处直接调 read_file/write_file 的测试改用 `_DEFAULT_READ_FILES` 兜底。
+- **验证**：`not e2e` 99 绿（原 92 + 7）；实证——两 Agent 的 read_files 互不含、schema 只有 `path`；
+  连续创建的多个实例 trace 后缀单调序号（0000/0001/…）全不撞（`id(self)` 方案被测试当场证伪后改此）；
+  坏参数返回「参数不对」不崩。
+
 ## 学习笔记（docs/ 下 9 篇主题式 + 导览）
 
 - **成果**：把从零手搓这一路的认知性经验沉淀成 9 篇主题笔记，统一结构
@@ -390,6 +426,32 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
 - 建 `C:\AI_learning\myagent`（与学习仓库平级）；`requirements.txt`（anthropic + tiktoken）；
   `.gitignore`；`CLAUDE.md`（项目宪法）；`PROGRESS.md`（本文件）；
   `tests/00_smoke_test.py` 跑通一次 Anthropic 调用（返回 pong）。
+
+---
+
+## 已知设计权衡 / 缺口
+
+以下是 code review 指出的、**当前有意为之或暂未处理**的设计点。如实记下（不假装不存在），
+多数是学习项目的极简取舍，标注「何时该改」以便日后判断。
+
+- **#7 没有 system prompt**：所有指令都塞在 user 任务里，`messages.create` 从不设 `system`。
+  意味着没有持久角色约定，「先读再改/不要蒙混」这类护栏只在 harness 硬拦、模型侧完全不知情
+  （只能被拒后从 tool_result 反推）。何时该改：想让模型主动遵守约定、减少被拒返工时。
+- **#8 `max_tokens=2048` 写死**：Think 调用与压缩摘要都固定 2048。一个能 write_file 的编码 agent，
+  单次输出 2048 token 连中等文件都写不全 → 会被截在 `stop_reason=max_tokens`，而循环没对这种截断
+  做任何处理（只判 tool_use vs 其它）。何时该改：真要用它写大文件 / 长历史摘要时。
+- **#9 验证门对非代码任务也无脑跑检查**：`/check pytest` 后，哪怕问「今天几号」，答完也会强制跑
+  pytest；若 pytest 因无关原因失败，纯问答会被反复打回。验证门没有「本任务是否涉及代码」的概念，
+  粒度过粗。何时该改：想让验证门只在代码类任务生效时。
+- **#10 验证门判定靠子串匹配**：输出含 `fail/error/错误/[未` 即判失败。正常输出里的 `0 errors` /
+  `No errors found` 会被误判为失败；`[未` 是为匹配 `[未完成]` 但会误伤任何 `[未…]`。作为「提升成功率
+  最大的一环」，判据本身不够可靠。何时该改：想让验证更稳时（如按退出码而非文本）。
+- **#11 trace 落盘 O(n²) 磁盘**：每轮都把完整 `messages_sent`（整个历史）写进 `turn_NN.json`，
+  长会话第 N 轮的文件含前 N 轮全量 → 总磁盘 ~O(n²)；且 `traces/` 无自动清理。何时该改：长会话/长期
+  运行导致磁盘吃紧时（如只存增量、或加保留期清理）。
+- **#12 非 `-e` 安装 `.env` 读不到**：`_HERE` 三级上跳假设源码在仓库树里；`pip install .`（非 `-e`）后
+  包在 site-packages，`.env` 定位失效。项目约定只用 `-e`（见 CLAUDE.md），可接受但脆。何时该改：
+  要正式打包分发时。
 
 ---
 

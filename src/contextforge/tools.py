@@ -50,6 +50,11 @@ def tool(param_desc: dict | None = None):
         properties = {}
         required = []
         for pname, p in sig.parameters.items():
+            # 下划线前缀参数是「带外注入」的实例状态（如 _read_files），不暴露给模型——
+            # 跳过它，input_schema 里就没有它，模型不会也不该传（对标 Pydantic AI 的 RunContext：
+            # 运行时依赖不进 schema）。见 execute_tool 的 read_files 注入。
+            if pname.startswith("_"):
+                continue
             json_type = _PY_TO_JSON.get(p.annotation, "string")  # 注解缺失就当字符串
             properties[pname] = {
                 "type": json_type,
@@ -81,20 +86,24 @@ def tool(param_desc: dict | None = None):
 # 1. 工具函数：真正干活的「手」（加 @tool 即自动注册 + 生成 schema）
 # ─────────────────────────────────────────────────────────────
 
-# 记录「本会话读过哪些文件」，供 write_file 的「先读再改」约束检查。
-# 由本模块的 read_file 在读成功后自己登记（见下方 read_file）。这里用集合存绝对路径。
-READ_FILES: set = set()
+# 「本会话读过哪些文件」的默认兜底集合，供 write_file 的「先读再改」约束检查。
+# ⚠️ 正式路径下，这个状态是 **Agent 实例状态**（agent.py 的 self.read_files），由 execute_tool
+# 带外注入给工具的 _read_files 参数——每个 Agent（含子 agent）各有一套，天然隔离、reset 即清空。
+# 这里的模块级集合只是「脱离 Agent、直接调 read_file/write_file 时」的兜底（如单测直接调）。
+_DEFAULT_READ_FILES: set = set()
 
 
 @tool({"path": "文件路径，可以是相对或绝对路径"})
-def read_file(path: str) -> str:
+def read_file(path: str, _read_files: set | None = None) -> str:
     """读取一个文本文件的完整内容。当你需要查看某个文件写了什么时使用。"""
     # 错误不抛异常，而是返回可读字符串 —— 这样错误会进入模型上下文，
     # 模型能据此自我纠正（第 3.2 节「让 LLM 自己解决问题」）。
+    # _read_files 是带外注入的实例集合（不进 schema）；None 时回退到模块级默认兜底。
+    read_files = _read_files if _read_files is not None else _DEFAULT_READ_FILES
     try:
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
-        READ_FILES.add(_norm(path))  # 登记：这个文件被读过了
+        read_files.add(_norm(path))  # 登记：这个文件被读过了
         return content
     except FileNotFoundError:
         return f"[错误] 文件不存在：{path}"
@@ -127,20 +136,22 @@ def run_command(command: str) -> str:
 
 
 @tool({"path": "要写入的文件路径", "content": "要写入文件的完整内容"})
-def write_file(path: str, content: str) -> str:
+def write_file(path: str, content: str, _read_files: set | None = None) -> str:
     """把内容写入文件（覆盖原内容）。**必须先用 read_file 读过该文件才能写**（防止盲改）。"""
     # 「先读再改」硬约束（对照 Claude Code 第 15.2 节 FileEditTool）：
     # 没读过的已存在文件，禁止写 —— 防止模型基于「想象的内容」盲目覆盖。
     # 这是本项目第一个真正的 harness 约束：用代码强制，不靠模型自律。
+    # _read_files 是带外注入的实例集合（不进 schema）；None 时回退到模块级默认兜底。
     import os
+    read_files = _read_files if _read_files is not None else _DEFAULT_READ_FILES
     norm = _norm(path)
-    if os.path.exists(path) and norm not in READ_FILES:
+    if os.path.exists(path) and norm not in read_files:
         return (f"[拒绝] 文件已存在但你还没读过它：{path}。"
                 f"请先用 read_file 读取，确认当前内容后再写，避免盲目覆盖。")
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
-        READ_FILES.add(norm)  # 写完也算「知道内容」，之后可再改
+        read_files.add(norm)  # 写完也算「知道内容」，之后可再改
         return f"[成功] 已写入 {path}（{len(content)} 字符）"
     except Exception as e:  # noqa: BLE001
         return f"[错误] 写入失败：{path} —— {e}"
@@ -165,14 +176,30 @@ def subagent_tool_schemas() -> list:
 
 
 def _norm(path: str) -> str:
-    """把路径归一化成绝对路径，作为 READ_FILES 的键（避免相对/绝对不一致）。"""
+    """把路径归一化成绝对路径，作为「已读文件」集合的键（避免相对/绝对不一致）。"""
     import os
     return os.path.normcase(os.path.abspath(path))
 
 
-def execute_tool(name: str, tool_input: dict) -> str:
-    """按名分发到真正的函数并执行。找不到就返回可读错误。"""
+def execute_tool(name: str, tool_input: dict, read_files: set | None = None) -> str:
+    """按名分发到真正的函数并执行。找不到 / 参数不对都返回可读错误（不抛，让模型自我纠正）。
+
+    read_files：带外注入的「本会话已读文件」集合（Agent 实例状态）。只对签名含 `_read_files`
+    的工具（read_file/write_file）注入；其余工具不受影响。None 时工具走自己的模块级默认兜底。
+    """
     func = TOOL_FUNCTIONS.get(name)
     if func is None:
         return f"[错误] 未知工具：{name}"
-    return func(**tool_input)
+    # 带外注入实例状态：仅当工具签名声明了 _read_files 才传（避免给不认识它的工具塞参数）。
+    call_kwargs = dict(tool_input)
+    if read_files is not None and "_read_files" in inspect.signature(func).parameters:
+        call_kwargs["_read_files"] = read_files
+    try:
+        return func(**call_kwargs)
+    except TypeError as e:
+        # 模型幻觉出错误参数名/缺参（如 read_file(filename=...) 而非 path=）→ 参数绑定 TypeError。
+        # 三个工具各自的 try 在函数体内，挡不住这层绑定错误。这里兜住，让错误进模型上下文自我纠正，
+        # 而非穿透 pool.map → 崩掉整个 run。
+        return f"[错误] 工具 {name} 参数不对：{e}（请检查参数名/类型是否与工具说明一致）"
+    except Exception as e:  # noqa: BLE001 —— 教学项目，任何工具异常都兜成可读串，不崩循环
+        return f"[错误] 工具 {name} 执行异常：{e}"

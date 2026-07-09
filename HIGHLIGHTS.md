@@ -21,6 +21,8 @@
   → [context.py `compact_messages`](./src/contextforge/context.py)
 - **sub-agent 就是「一个工具」**：`spawn_subagent` 是普通 `@tool`，内部 `new Agent()` 跑完只回传结论；
   上下文隔离靠两个 Agent 实例的 messages 是独立 list 天然成立。→ [agent.py `spawn_subagent`](./src/contextforge/agent.py)
+  （诚实补一句：早期「已读文件」状态曾是**模块级全局**、是这条隔离原则的一个漏网反例——子 agent 会
+  和主 agent 共享它。已收进 `Agent.self.read_files`、由 execute_tool 带外注入修正，隔离才真正闭环。）
 - **循环 import 是「东西放错层」的信号**：`spawn_subagent` 需要 Agent，故定义在 agent.py 而非 tools.py——
   延迟 import 只治标，挪到依赖正确的层才根治。
 

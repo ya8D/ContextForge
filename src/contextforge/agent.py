@@ -16,6 +16,7 @@ Anthropic 消息形态（与书里 OpenAI 版的关键差异，见 CLAUDE.md 对
 - 是否要工具   → resp.stop_reason == "tool_use"
 """
 
+import itertools
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -128,6 +129,12 @@ def _truncate_for_feedback(result: str) -> str:
 class Agent:
     """最小 TAOR agent：一个循环 + 一组工具 + 一段对话历史。"""
 
+    # 进程内单调递增的实例序号，给 trace 目录做**唯一后缀**。
+    # 为什么不用 id(self)：短生命周期的 Agent 建完即被回收，id() 会被下一个实例复用 →
+    # 同秒并行/连续创建时低位撞车、trace 目录仍会撞名（实测 5 个实例常只有 1-2 个唯一）。
+    # 单调计数器进程内绝不重复，且零随机性（符合项目「不用 random/uuid」的风格）。
+    _instance_seq = itertools.count()
+
     def __init__(self, model: str | None = None, max_iterations: int = 100,
                  compact_threshold: int | None = None,
                  check_command: str | None = None,
@@ -168,12 +175,19 @@ class Agent:
         self.validation_gate = ValidationGate(check_command=self.check_command)
         # 对话历史：TAOR 每一轮的「所见所想所做」都累积在这里。
         self.messages: list[dict] = []
-        # 本次会话的 trace 根目录，按 年/月/日/run_时分秒 分层（普通脚本可用 datetime.now）。
-        # 分层便于按日期归档、避免一堆平铺时间戳。一个会话（一个 Agent 实例）可跑多个任务，
-        # 每个任务再单独建 task_NN 子目录，子目录里放 turn_NN.json —— 跨任务不会撞名覆盖。
+        # 「本会话已读文件」集合——「先读再改」约束的状态。**每个 Agent 实例各一套**（含子 agent），
+        # 由 execute_tool 带外注入给 read_file/write_file。放实例而非模块全局，才能让 reset（新建实例）
+        # 清空它、子 agent 与主 agent 天然隔离、并行执行时各写各的不竞态。
+        self.read_files: set = set()
+        # 本次会话的 trace 根目录，按 年/月/日/run_时分秒_序号 分层（普通脚本可用 datetime.now）。
+        # 分层便于按日期归档。末尾的实例序号是**唯一标识**：一轮里可并行派生多个子 agent
+        # （spawn_subagent / _summarize_via_subagent），它们同一秒创建，若只到秒级会撞同一个
+        # run_HHMMSS/ 目录、各自 task_01 互相覆盖、静默丢 trace。用进程内单调序号区分（见 _instance_seq）。
+        # 一个会话（一个实例）可跑多个任务，每个任务再单独建 task_NN 子目录。
         _now = datetime.now()
         self.trace_dir = (
-            _TRACES_ROOT / f"{_now:%Y}" / f"{_now:%m}" / f"{_now:%d}" / f"run_{_now:%H%M%S}"
+            _TRACES_ROOT / f"{_now:%Y}" / f"{_now:%m}" / f"{_now:%d}"
+            / f"run_{_now:%H%M%S}_{next(Agent._instance_seq):04d}"
         )
         if _trace_enabled():
             self.trace_dir.mkdir(parents=True, exist_ok=True)
@@ -187,6 +201,11 @@ class Agent:
         self.current_task_dir = self.trace_dir / f"task_{self.task_counter:02d}"
         if _trace_enabled():
             self.current_task_dir.mkdir(parents=True, exist_ok=True)
+
+        # 死循环检测是**任务内**概念：清空上个任务残留的 action 指纹，别让任务2 头几轮和任务1
+        # 结尾混在同一滑动窗口里误判/漏判。（区别于有意跨任务保留的 messages / validation_gate——
+        # 那是「短期记忆」；而循环窗口跨任务保留没有语义依据。）
+        self.loop_detector.reset()
 
         _log("\n🎯 [任务]", task)
         if _trace_enabled():
@@ -302,7 +321,10 @@ class Agent:
             if to_execute:
                 with ThreadPoolExecutor(max_workers=8) as pool:
                     results = list(pool.map(
-                        lambda b: execute_tool(b.name, b.input), to_execute
+                        # read_files 带外注入本实例的「已读集合」——read_file/write_file 收到它，
+                        # 别的工具忽略。每个 Agent 各写各的 set，并行不竞态、子 agent 不泄漏。
+                        lambda b: execute_tool(b.name, b.input, read_files=self.read_files),
+                        to_execute,
                     ))
                 for b, r in zip(to_execute, results):
                     executed[b.id] = r

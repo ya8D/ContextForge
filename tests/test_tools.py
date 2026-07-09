@@ -75,9 +75,9 @@ def test_read_missing_file_returns_error_not_raise(tmp_path):
 def test_read_registers_in_read_files(tmp_path):
     f = tmp_path / "reg.txt"
     f.write_text("x", encoding="utf-8")
-    tools.READ_FILES.discard(_norm(str(f)))  # 先确保没登记
+    tools._DEFAULT_READ_FILES.discard(_norm(str(f)))  # 先确保没登记
     read_file(str(f))
-    assert _norm(str(f)) in tools.READ_FILES  # 读后应被登记
+    assert _norm(str(f)) in tools._DEFAULT_READ_FILES  # 读后应被登记（默认兜底集合）
 
 
 # ── write_file 的「先读再改」硬约束（重点）────────────────────
@@ -85,7 +85,7 @@ def test_read_registers_in_read_files(tmp_path):
 def test_write_existing_file_without_reading_is_rejected(tmp_path):
     f = tmp_path / "exist.txt"
     f.write_text("原内容", encoding="utf-8")
-    tools.READ_FILES.discard(_norm(str(f)))  # 确保「没读过」
+    tools._DEFAULT_READ_FILES.discard(_norm(str(f)))  # 确保「没读过」
     result = write_file(str(f), "新内容")
     assert result.startswith("[拒绝]")
     assert f.read_text(encoding="utf-8") == "原内容"  # 文件未被改动
@@ -119,6 +119,50 @@ def test_run_command_bad_command_returns_error_not_raise():
     # 不存在的命令应返回可读文本，而不是抛异常让 agent 崩溃
     result = run_command("this_command_definitely_does_not_exist_xyz")
     assert isinstance(result, str)  # 返回字符串（可能是错误信息或 shell 的报错）
+
+
+# ── 带外注入的 _read_files 不进 schema + 实例隔离 ─────────────
+
+def test_underscore_param_not_in_schema():
+    """下划线前缀参数（_read_files）是带外注入的实例状态，不该出现在给模型的 input_schema 里。"""
+    schema = next(s for s in tools.TOOL_SCHEMAS if s["name"] == "read_file")
+    props = schema["input_schema"]["properties"]
+    assert "path" in props
+    assert "_read_files" not in props            # 模型看不到它
+    ws = next(s for s in tools.TOOL_SCHEMAS if s["name"] == "write_file")
+    assert "_read_files" not in ws["input_schema"]["properties"]
+
+
+def test_read_files_isolation_via_injected_set(tmp_path):
+    """带外注入不同的 _read_files 集合 → 「已读」状态互相隔离（模拟两个 Agent / 主子 agent）。"""
+    f = tmp_path / "iso.txt"
+    f.write_text("x", encoding="utf-8")
+    set_a: set = set()
+    set_b: set = set()
+    read_file(str(f), _read_files=set_a)          # 只有 A 读了
+    assert _norm(str(f)) in set_a
+    assert _norm(str(f)) not in set_b             # B 不受影响（隔离）
+    # 于是同一个文件：用 A 的集合写放行，用 B 的集合写被拒（B 没读过）
+    assert write_file(str(f), "改", _read_files=set_a).startswith("[成功]")
+    f.write_text("x", encoding="utf-8")
+    assert write_file(str(f), "改", _read_files=set_b).startswith("[拒绝]")
+
+
+def test_execute_tool_injects_read_files(tmp_path):
+    """execute_tool 把带外 read_files 注入给 read_file/write_file，进而满足「先读再改」。"""
+    f = tmp_path / "inj.txt"
+    f.write_text("原", encoding="utf-8")
+    rf: set = set()
+    execute_tool("read_file", {"path": str(f)}, read_files=rf)      # 经 execute_tool 读
+    assert _norm(str(f)) in rf                                       # 注入的集合被登记
+    assert execute_tool("write_file", {"path": str(f), "content": "新"}, read_files=rf).startswith("[成功]")
+
+
+def test_execute_tool_bad_param_name_returns_error_not_raise():
+    """模型幻觉出错误参数名（read_file(filename=...) 而非 path=）→ 返回可读错误、不抛崩溃。"""
+    result = execute_tool("read_file", {"filename": "x.txt"})       # 错误参数名
+    assert isinstance(result, str)
+    assert "参数不对" in result
 
 
 # ── execute_tool 分发 ────────────────────────────────────────
