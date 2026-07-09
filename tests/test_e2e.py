@@ -392,3 +392,42 @@ def test_subagent_executor_reverifies_by_reading_file(tmp_path):
         f"摘要里没有文件真实值 {_PROBE_CURRENT} —— 子 agent 没有回读核实（盲总结只会照抄"
         f"历史里的过期值 {_PROBE_STALE}）。正文：\n{body}"
     )
+
+
+# ── P4 支柱三：真实 AI 验证「验证门能拦住假完成、打回」 ──────────────────────
+#
+# 核心手法——检查命令始终报 CHECK_FAIL（探针文件不存在、且任务不让建），构造一个
+# 模型「声称完成 → 验证门跑检查 → 未通过 → 打回」的场景。
+# 断言：① 历史里出现过「[验证门]」打回消息（铁证门真的拦了假完成，不是一次放行）；
+#       ② 循环最终收敛（返回答案，或达 max_iterations 被护栏兜底停）——不卡死。
+#
+# 为什么不要求「模型建文件去满足检查」：实测发现，验证门打回消息里带「不要删除/修改
+# 检查来蒙混」，模型会把「凭空写个探针文件去骗过文件存在性检查」判为**伪造产物、作弊**，
+# 于是坚决拒绝写、一路顶到护栏。模型是对的——检查的是「文件在不在」而非「真实完成」，
+# 为过检查而造假本就该拒。故本用例只验证门的**拦截职责**（打回假完成），不强求模型作弊。
+# 这次意外反而证明了更强的结论：模型甚至拒绝为通过验证门而伪造产物，正是「不要蒙混」的正效果。
+# ⚠️ 真调 API、会跑到 max_iterations；用户已确认不在意 token。
+
+@pytest.mark.e2e
+def test_validation_gate_rejects_false_completion(tmp_path):
+    """验证门配了检查命令、且检查必失败时：模型声称完成会被反复打回，闭环不放行。"""
+    probe = tmp_path / "gate_probe.txt"
+    probe_path = str(probe).replace("\\", "/")
+    # 检查命令：探针不存在 → CHECK_FAIL（含 fail，验证门判未过）。任务不让建，故恒失败。
+    check_cmd = (
+        f'py -c "import os; '
+        f"print('CHECK_OK' if os.path.exists(r'{probe_path}') else 'CHECK_FAIL')\""
+    )
+
+    agent = Agent(check_command=check_cmd, max_iterations=4)
+    final = agent.run("请用一句话口头回复『收到』即可，不要创建任何文件、不要调用任何工具。")
+
+    # 断言 1：历史里出现过「[验证门]」打回 —— 门真的拦住了首次完成声称
+    saw_pushback = any(
+        isinstance(m.get("content"), str) and "[验证门]" in m["content"]
+        for m in agent.messages
+    )
+    assert saw_pushback, "历史里没有『[验证门]』打回 —— 门没拦住未通过检查的完成声称"
+
+    # 断言 2：循环最终收敛（返回字符串答案，或达 max_iterations 被护栏兜底）—— 不卡死
+    assert isinstance(final, str)
