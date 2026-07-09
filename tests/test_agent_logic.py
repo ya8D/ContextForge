@@ -203,6 +203,35 @@ def test_compact_threshold_invalid_env_falls_back(monkeypatch):
         assert Agent().compact_threshold == COMPACT_THRESHOLD_TOKENS
 
 
+def test_compact_threshold_1m_80pct_trigger_boundary(monkeypatch):
+    """把阈值设成 1M 窗口的 80%（800K）→ 上下文到 800K 才触发压缩，799,999 不触发。
+
+    这验证的不只是"阈值被解析对了"，而是它真的被用作压缩判据：Chromium 这类大项目
+    想用满更多上下文再压，就靠调高这个阈值。用真实 usage 三字段（input+cache_read+
+    cache_write，= 发出去的真实规模）构造刚好卡在边界两侧的规模。
+    """
+    from myagent.context import should_compact
+
+    monkeypatch.setenv("MYAGENT_COMPACT_THRESHOLD", "800000")  # 1,000,000 * 0.8
+    threshold = Agent().compact_threshold
+    assert threshold == 800_000
+
+    # 刚好差 1 token 到阈值 → 不压（799,999 < 800,000）
+    just_below = {"input_tokens": 799_999, "cache_read_input_tokens": 0,
+                  "cache_creation_input_tokens": 0}
+    assert should_compact(just_below, threshold=threshold) is False
+
+    # 恰好等于阈值 → 触发（>=）
+    at_threshold = {"input_tokens": 500_000, "cache_read_input_tokens": 300_000,
+                    "cache_creation_input_tokens": 0}
+    assert should_compact(at_threshold, threshold=threshold) is True
+
+    # 超过阈值 → 触发
+    above = {"input_tokens": 400_000, "cache_read_input_tokens": 400_000,
+             "cache_creation_input_tokens": 1}
+    assert should_compact(above, threshold=threshold) is True
+
+
 # ── 压缩执行者：显式 > MYAGENT_COMPACT_EXECUTOR > "self"（让子 agent 核实成为可选操作）──
 
 def test_compact_executor_reads_env(monkeypatch):
