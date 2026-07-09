@@ -270,7 +270,11 @@ def compact_by_directive(
     summary = summarizer(prompt)
 
     marker = f"[前情摘要 · 由 context.py 指令驱动压缩生成，按要求：{directive}]"
-    summary_msg = {"role": "user", "content": f"{marker}\n{summary}"}
+    # 护栏：真实 trace 发现压缩后模型会「好心补全」被删内容（把用户明令删掉的又生成回来），
+    # 违背压缩本意。故在摘要消息里明确这是用户主动删除后的最终状态、禁止补全/恢复。
+    # 必须写在摘要消息本身（后续每轮主 AI 都会读到），而非生成摘要的 prompt。
+    guard = "（重要：这是压缩后的最终上下文。被删内容是用户主动删除的，禁止补全、恢复或重新生成被删除的部分。）"
+    summary_msg = {"role": "user", "content": f"{marker}\n{guard}\n{summary}"}
     new_messages = [head, summary_msg]
 
     stats = {

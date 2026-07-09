@@ -236,6 +236,7 @@ def test_compact_by_directive_keeps_head_compacts_rest():
     assert new_msgs[0] is msgs[0]                  # 保首条（同一对象）
     assert "前情摘要" in new_msgs[1]["content"]     # 其余压成摘要
     assert "只保留结论，删掉过程" in new_msgs[1]["content"]
+    assert "禁止补全" in new_msgs[1]["content"]     # 护栏在场：禁止模型补全被删内容
     assert stats["kept_recent_turns"] == 0         # 不单独保末条
 
 
