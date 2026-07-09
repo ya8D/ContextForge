@@ -210,19 +210,23 @@ class Agent:
         _log("\n🎯 [任务]", task)
         if _trace_enabled():
             _log("📁 [trace]", f"本任务 in/out 落盘到 {self.current_task_dir}")
-        # 用户任务作为历史的第一条消息。记住 append 前的长度：一旦本任务中途抛异常
-        # （API 抖动/限流等），把 self.messages 截回这里——否则会留下一条「有 user 问、无 assistant 答」
-        # 的悬挂消息，下个任务再 append 就变成两条连续 user，污染后续对话（甚至若异常发生在压缩后、
-        # 中段已被改写，历史结构会坏）。回滚保证「失败=本任务如同没发生过」，会话历史保持干净可续。
-        _msgs_before = len(self.messages)
+        # 用户任务作为历史的第一条消息。先给「任务开始前的干净历史」拍一份快照：一旦本任务中途
+        # 抛异常（API 抖动/限流等），把 self.messages 整体还原到这份快照——否则会留下一条「有 user 问、
+        # 无 assistant 答」的悬挂消息，下个任务再 append 就变成两条连续 user，污染后续对话。
+        # 为什么用「快照整体还原」而非「记长度按索引截」：本任务中途可能触发压缩，压缩会把
+        # self.messages **整体重写成一条更短的新列表**（保头+摘要+保尾）——此时旧长度索引已失真，
+        # `del [旧长度:]` 截不掉悬挂消息、还留着压缩摘要，回滚失效。快照法无视中途怎么重写，
+        # 都能精确还原到任务开始前。用 `list(...)` 浅拷贝：消息 dict 本身不被本任务原地改，够用。
+        _msgs_snapshot = list(self.messages)
         self.messages.append({"role": "user", "content": task})
 
         try:
             return self._run_loop()
         except Exception:
-            # 回滚本任务追加的一切（悬挂 user + 已产生的中间轮），保持历史干净，再把异常抛给上层
-            # （CLI 会兜住、提示可重试）。用 del 原地截断，不换 list 对象（引用语义与别处一致）。
-            del self.messages[_msgs_before:]
+            # 失败 → 把历史整体还原到任务开始前的快照（丢掉悬挂 user + 本任务中间轮 + 可能的压缩改写），
+            # 再把异常抛给上层（CLI 会兜住、提示可重试）。用切片赋值原地恢复，不换 list 对象（引用语义
+            # 与别处一致）。
+            self.messages[:] = _msgs_snapshot
             raise
 
     def _run_loop(self) -> str:

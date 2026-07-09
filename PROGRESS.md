@@ -57,9 +57,15 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
 - **审查后补修（对这批修复做了 8 角度 code review，揪出两处未到位）**：
   - **#4 脏历史**：原修复只让 CLI「不退出」，但 `run()` 抛异常时 `self.messages` 已 append 了本次
     user 任务、无 assistant 应答——下个任务再 append 就成两条连续 user，污染对话（实测复现）。补修：
-    `run()` 拆出 `_run_loop()`，外层 `try/except` 在失败时 `del self.messages[本任务起点:]` 回滚，
-    保证「失败=本任务如同没发生」。加测试 `test_run_rolls_back_messages_on_failure`（mock API 抛错，
-    断言历史干净、无连续 user）。
+    `run()` 拆出 `_run_loop()`，外层 `try/except` 在失败时回滚，保证「失败=本任务如同没发生」。
+    加测试 `test_run_rolls_back_messages_on_failure`。
+    - **再审又揪出回滚本身的 bug（快照法替代索引法）**：初版回滚用 `del self.messages[旧长度:]`，
+      隐含假设「messages 只增长、是同一个 list」。但本任务中途可能触发**压缩**——压缩把
+      `self.messages` **整体重写成一条更短的新列表**，旧长度索引随即失真，`del [旧长度:]` 截不掉
+      悬挂消息、还留着压缩摘要，回滚在压缩场景下**失效**（实测：干净 11 条→压缩 9 条→回滚后仍 9 条、
+      出现连续 user）。我在初版注释里预见了这个风险、却没真防住。改为**快照法**：任务开始前
+      `_msgs_snapshot = list(self.messages)`，失败时 `self.messages[:] = _msgs_snapshot` 整体还原——
+      无视中途怎么重写都能精确还原。加回归测试 `test_run_rollback_survives_midtask_compaction`。
   - **#1 只修了一半**：`_DEFAULT_READ_FILES` 兜底集合仍是模块全局——直接调 read_file/write_file
     不传 `_read_files` 时走它，旧的跨调用累积 bug 原样保留，且一个测试仍靠它的副作用串味（注释还
     引用已删的 `READ_FILES`）。收尾：**删掉 `_DEFAULT_READ_FILES`**，`_read_files=None` 时改用

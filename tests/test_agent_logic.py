@@ -428,3 +428,33 @@ def test_run_rolls_back_messages_on_failure():
     # 连续两条 user 不该出现
     assert not any(a.messages[i]["role"] == "user" and a.messages[i + 1]["role"] == "user"
                    for i in range(len(a.messages) - 1))
+
+
+def test_run_rollback_survives_midtask_compaction():
+    """关键回归：本任务中途触发压缩（messages 被整体重写变短）后再失败 → 快照回滚仍精确还原。
+
+    索引式回滚（del [旧长度:]）在这里会失效：压缩换了 list、旧长度失真，截不掉悬挂消息。
+    快照式回滚（self.messages[:] = 快照）无视中途重写，能还原到任务开始前。
+    """
+    import unittest.mock as mock
+    a = Agent()
+    # 干净的旧历史（够长，能被压缩真的压）
+    a.messages = [{"role": "user", "content": "旧任务"}]
+    for i in range(5):
+        a.messages.append({"role": "assistant", "content": f"步骤{i}"})
+        a.messages.append({"role": "user", "content": f"继续{i}"})
+    before = list(a.messages)
+
+    # 模拟 _run_loop：先把 self.messages 整体换成一条更短的新 list（模拟压缩改写），再抛异常。
+    def fake_loop():
+        a.messages = [a.messages[0], {"role": "user", "content": "[前情摘要] …"}]  # 换新 list、变短
+        raise RuntimeError("压缩之后才抖动")
+
+    with mock.patch.object(a, "_run_loop", side_effect=fake_loop):
+        try:
+            a.run("会失败的任务")
+        except RuntimeError:
+            pass
+    assert a.messages == before                    # 尽管中途压缩改写过，仍精确还原到干净历史
+    assert not any(a.messages[i]["role"] == "user" and a.messages[i + 1]["role"] == "user"
+                   for i in range(len(a.messages) - 1))
