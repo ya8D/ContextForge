@@ -82,7 +82,7 @@ def tool(param_desc: dict | None = None):
 # ─────────────────────────────────────────────────────────────
 
 # 记录「本会话读过哪些文件」，供 write_file 的「先读再改」约束检查。
-# 由 agent 层在执行 read_file 后登记（见 agent.py）。这里用集合存绝对路径。
+# 由本模块的 read_file 在读成功后自己登记（见下方 read_file）。这里用集合存绝对路径。
 READ_FILES: set = set()
 
 

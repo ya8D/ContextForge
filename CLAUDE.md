@@ -83,13 +83,13 @@
 ```
 <项目根>/
   pyproject.toml         # console_scripts 入口（contextforge = contextforge.cli:main）+ src 布局声明
-  requirements.txt      # anthropic + tiktoken
+  requirements.txt      # anthropic + python-dotenv + pytest
   pytest.ini            # pythonpath = src，让 tests/ 能 import src/contextforge 包
   src/
     contextforge/
       __init__.py       # 包标记
-      agent.py          # 核心 TAOR loop（后续阶段逐步长大）
-      tools.py          # 工具注册表 + 内置工具（含 P5 spawn_subagent 派生子 agent）
+      agent.py          # 核心 TAOR loop + spawn_subagent（派生子 agent 的工具，需 Agent 故放这层）
+      tools.py          # 工具注册表 + 内置工具（read_file / run_command / write_file）
       context.py        # 上下文/压缩（P3：真实 usage 判规模，超阈值压中段）
       harness.py        # 权限拦截 + 死循环检测 + 验证门（P4：三根柱子）
       cli.py             # CLI 入口（原 main.py，T3 标准包布局后改名）

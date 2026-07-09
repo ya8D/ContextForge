@@ -16,7 +16,7 @@
 | **P1 裸 TAOR 循环** | agent 的本质：Think → Act → Observe → Repeat（带工具的 while 循环） | `agent.py` |
 | **P2 多工具 + 并行 + 回喂截断** | `@tool` 装饰器自动生成 schema；一轮多工具并行执行；先读再改约束 | `tools.py` |
 | **P3 上下文压缩** | 用真实 usage 判上下文规模，超阈值把中段历史压成摘要（保头/压中段/保尾） | `context.py` |
-| **P4 Harness 三根柱子** | 权限拦截（危险命令/路径遍历）、死循环检测、验证门（防假完成/偷删测试） | `harness.py` |
+| **P4 Harness 三根柱子** | 权限拦截（危险命令/路径遍历）、死循环检测、验证门（防假完成） | `harness.py` |
 | **P5 Sub-agent** | 主 agent 派生**上下文隔离**的子 agent 跑子任务、只回传结论 | `agent.py`（`spawn_subagent`） |
 
 ## 关键设计原则

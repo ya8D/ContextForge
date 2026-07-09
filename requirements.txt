@@ -1,10 +1,8 @@
-# myagent 依赖
+# ContextForge 依赖
 # anthropic: Claude 官方 Python SDK（本项目底层模型 API）
 anthropic>=0.40.0
 # python-dotenv: 从 .env 读取代理凭据（ANTHROPIC_AUTH_TOKEN / BASE_URL / MODEL）。
 # 这套凭据由 VSCode 扩展注入，普通终端拿不到，故落到本地 .env（不进 git）。
 python-dotenv>=1.0.0
-# tiktoken: token 计数（Phase 3 上下文管理用）
-tiktoken>=0.8.0
-# pytest: 自动化测试（Phase 2.5）。跑 `py -m pytest -m "not e2e"` 只跑不烧钱的纯逻辑测试。
+# pytest: 自动化测试。跑 `py -m pytest -m "not e2e"` 只跑不烧钱的纯逻辑测试。
 pytest>=8.0.0
