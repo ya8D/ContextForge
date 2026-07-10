@@ -254,23 +254,12 @@ class LoopDetector:
 # 支柱③ 验证门（自验证循环）
 # ─────────────────────────────────────────────────────────────
 
-# 检测「测试文件被删/大幅删减」的常见作弊模式（对照书 _check_test_deletions）。
-# 审查 #8：本函数已从「悬空未接入」改为**接进运行时**——tools.write_file 覆盖已存在的测试文件时
-#    会比对新旧行数并调用它，疑似掏空则拒绝写入。补的正是验证门（按退出码判）也挡不住的盲区：
-#    删光用例后 pytest 仍退出 0「通过」。
-def check_test_deletion(file_path: str, lines_added: int, lines_deleted: int) -> tuple[bool, str]:
-    """检测一次写文件是否像「偷删测试来让测试过」。返回 (是否可疑, 原因)。
-
-    作弊模式：改的是测试文件，且删的行数远多于加的行数（把测试内容掏空）。
-    这是书里点名的「AI 常见作弊」——嘴上说测试过了，其实把测试删了。
-    只看**文件名**是否含 test（而非整个路径），避免父目录恰好含 "test"（如 pytest 临时目录）误判。
-    """
-    basename = os.path.basename(file_path).lower()
-    if "test" not in basename:
-        return False, "非测试文件"
-    if lines_deleted > lines_added * 2 and lines_deleted > 5:
-        return True, f"测试文件 {file_path} 删 {lines_deleted} 行仅加 {lines_added} 行，疑似掏空测试"
-    return False, "正常"
+# 注：曾有过一个 check_test_deletion（检测「偷删测试骗绿」的作弊模式）。它一度被接进
+# write_file，但那是错误的接入点——write_file 是覆盖写、只有新旧行数、拿不到真实 diff，
+# 用「净行数差」近似判掏空会**两头都错**：合法精简测试（20→8 行）被误拦（假阳性），
+# 而真掏空（40 行断言全换成 40 行 pass，行数不变）漏过（假阴性，恰恰是最典型的作弊手法）。
+# 要可靠区分「掏空」vs「合法精简」需语义级信息（AST 层面数断言/空函数体），对本教学项目过重。
+# 故已彻底移除该函数及其接入。「删空测试骗绿」作为已知未处理问题记录在 PROGRESS.md。
 
 
 class ValidationGate:

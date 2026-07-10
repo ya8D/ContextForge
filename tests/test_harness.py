@@ -14,7 +14,6 @@ from contextforge.harness import (
     ValidationGate,
     check_command_safety,
     check_path_safety,
-    check_test_deletion,
     check_tool_call,
 )
 
@@ -259,24 +258,7 @@ def test_record_round_param_order_insensitive():
     assert ld.is_looping() is True
 
 
-# ── 支柱③ 验证门 + 防作弊 ──
-
-def test_check_test_deletion_flags_gutting():
-    """删测试远多于加 → 判定可疑（掏空测试作弊）。"""
-    suspicious, _ = check_test_deletion("tests/test_foo.py", lines_added=1, lines_deleted=40)
-    assert suspicious is True
-
-
-def test_check_test_deletion_ignores_non_test():
-    """非测试文件不管。"""
-    suspicious, _ = check_test_deletion("src/main.py", lines_added=1, lines_deleted=40)
-    assert suspicious is False
-
-
-def test_check_test_deletion_allows_normal_edit():
-    """测试文件正常增改（删得不多）不算作弊。"""
-    suspicious, _ = check_test_deletion("tests/test_foo.py", lines_added=10, lines_deleted=3)
-    assert suspicious is False
+# ── 支柱③ 验证门 ──
 
 
 def test_validation_gate_no_command_passes():

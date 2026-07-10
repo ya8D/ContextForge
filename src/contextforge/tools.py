@@ -177,24 +177,6 @@ def write_file(path: str, content: str, _read_files: set | None = None) -> str:
     if os.path.exists(path) and norm not in read_files:
         return (f"[拒绝] 文件已存在但你还没读过它：{path}。"
                 f"请先用 read_file 读取，确认当前内容后再写，避免盲目覆盖。")
-    # 防「偷删测试骗绿」（审查 #8：把原本悬空的 check_test_deletion 接进运行时）：
-    # 覆盖一个已存在的测试文件时，比对新旧行数——若删远多于加、疑似把测试掏空，拒绝。
-    # 这补的正是验证门（按退出码判）也挡不住的盲区：删光用例后 pytest 仍退出 0「通过」。
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                old_lines = f.read().count("\n") + 1
-            new_lines = content.count("\n") + 1
-            from contextforge.harness import check_test_deletion
-            # 用「旧-新」近似删除行数、新增按 0 估（覆盖式写入无法精确算增删，够触发掏空判据）。
-            suspicious, reason = check_test_deletion(
-                path, lines_added=max(new_lines - old_lines, 0),
-                lines_deleted=max(old_lines - new_lines, 0))
-            if suspicious:
-                return (f"[拒绝] {reason}。疑似为让测试通过而删空测试——这是作弊。"
-                        f"若确需大幅精简测试，请说明理由或分步进行。")
-        except Exception:  # noqa: BLE001 —— 比对失败不该挡住正常写入，静默跳过防护即可
-            pass
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)

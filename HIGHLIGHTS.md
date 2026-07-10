@@ -6,11 +6,11 @@
 ## harness：用代码强制，不靠模型自律
 
 - **先读再改**：没 `read_file` 读过的已存在文件禁止 `write_file`，防模型基于想象的内容盲改。
-  → [tools.py `write_file` / `READ_FILES`](./src/contextforge/tools.py)
+  → [tools.py `write_file` / `self.read_files`（Agent 实例状态，带外注入）](./src/contextforge/tools.py)
 - **危险命令运行时拦截**：不预筛工具，而是执行前正则拦 `rm -rf` / `format` / `chmod -R 777` 等。
   → [harness.py `check_command_safety`](./src/contextforge/harness.py)
-- **验证门防假完成**：模型声称完成时强制跑检查命令，没过就打回——对治 LLM 的完成偏见。
-  → [harness.py `ValidationGate`](./src/contextforge/harness.py)
+- **验证门防假完成**：模型声称完成时强制跑检查命令，**按退出码判**（0 通过 / 非 0 失败 /
+  超时异常视为未完成），没过就打回——对治 LLM 的完成偏见。→ [harness.py `ValidationGate`](./src/contextforge/harness.py)
 - **死循环检测按整轮 + 排序指纹**：只看第一个工具会漏报（多工具乱序循环）又误报（首工具相同但
   整轮在推进）；命中后不 reset，避免"每 3 轮才拦一次"放水。→ [harness.py `record_round`](./src/contextforge/harness.py)
 

@@ -17,9 +17,6 @@ test_audit_fixes_e2e.py —— 严格安全审查 7 条确认缺陷的**真实**
    #1 会烧少量 token（真调 API）。
 """
 
-import os
-import pathlib
-import tempfile
 import time
 
 import pytest
@@ -161,19 +158,3 @@ def test_7_command_blocklist_covers_bypasses():
         ok, reason = check_tool_call("run_command", {"command": cmd})
         print(f"\n[#7] run_command({cmd}) → {'放行' if ok else '拦:'+reason}")
         assert ok is False, f"危险命令变体未被拦（#7 未修复）: {cmd}"
-
-
-@pytest.mark.e2e
-def test_8_gutting_test_file_rejected_real_write():
-    """#8（真实 write_file）：覆盖测试文件时掏空用例被拦（check_test_deletion 已接进运行时）。"""
-    from contextforge.tools import read_file, write_file
-    d = tempfile.mkdtemp()
-    f = pathlib.Path(d) / "test_something.py"
-    original = "\n".join(f"def test_case_{i}(): assert True" for i in range(40))
-    f.write_text(original, encoding="utf-8")
-    rf: set = set()
-    read_file(str(f), _read_files=rf)                       # 先读（满足先读再改）
-    result = write_file(str(f), "def test_x(): pass", _read_files=rf)  # 40 行→1 行掏空
-    print(f"\n[#8] 掏空测试写入结果: {result[:80]}")
-    assert result.startswith("[拒绝]"), "掏空测试文件未被拦（#8 未修复：check_test_deletion 是死代码）"
-    assert f.read_text(encoding="utf-8") == original, "原测试文件被掏空覆盖（#8 未修复）"

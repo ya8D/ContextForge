@@ -182,6 +182,11 @@ def compact_messages(
         return messages, None
 
     # 头：第一条消息（原始任务）必须留——否则模型忘了要干嘛。
+    # ⚠️ 前提：messages[0] 恒为**纯文本 user 消息**（用户输入的任务，见 agent.py run() 里
+    # 第一条就是 {"role":"user","content":task}）。因此 head 里不含 tool_use，保头不会产生
+    # 「head 的 tool_use 失去配对 tool_result」的隐患。若哪天 messages[0] 变成 assistant(tool_use)
+    # （非常规输入），保头+压中段会孤立该 tool_use → 下一轮 API 400；但此前提由 TAOR 结构保证，
+    # 不额外加代码校验。
     head = messages[0]
     rest = messages[1:]
 

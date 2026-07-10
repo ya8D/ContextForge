@@ -53,7 +53,7 @@
 | `CONTEXTFORGE_COMPACT_DIRECTIVE` | 一段自然语言 | 无（走默认四维） | 会话级压缩偏好：被动压缩时告诉模型「保什么、删什么」（如「保留所有 Browser 相关报错，其余精简」）。 |
 | `CONTEXTFORGE_COMPACT_THRESHOLD` | 正整数（token） | `500000` | 上下文超过它才自动压缩。Chromium 这类大项目可调高、用满更多上下文再压。非法值兜底回默认。 |
 | `CONTEXTFORGE_COMPACT_EXECUTOR` | `self` / `subagent` | `self` | 压缩执行者：`self` 模型单次总结；`subagent` 派带工具的子 agent 回读文件核实结论后再写摘要。 |
-| `CONTEXTFORGE_CHECK_COMMAND` | 一条 shell 命令 | 无（跳过验证） | 验证门检查命令：模型声称完成前强制跑一遍，输出含 `fail`/`error`/`错误` 视为未过、打回重修。不设则声称完成即放行。也可在 CLI 用 `/check <命令>` 当场设。 |
+| `CONTEXTFORGE_CHECK_COMMAND` | 一条 shell 命令 | 无（跳过验证） | 验证门检查命令：模型声称完成前强制跑一遍，**按退出码判**（0 通过 / 非 0 失败 / 超时异常视为未完成），未过则打回重修。不设则声称完成即放行。也可在 CLI 用 `/check <命令>` 当场设。 |
 
 > CLI 里还有 `/compact [要求]` 命令做**主动压缩**（当场输入的要求即本次压缩偏好），见运行方式。
 

@@ -197,7 +197,11 @@ def test_check_command_default_none_skips_gate(monkeypatch):
     monkeypatch.delenv("CONTEXTFORGE_CHECK_COMMAND", raising=False)
     a = Agent()
     assert a.check_command is None
-    passed, _ = a.validation_gate.verify(lambda cmd: "")  # runner 不会被调到
+    # runner 用当前双参契约 (cmd, timeout)->(code, out)；check_command=None 时 verify 提前 return、
+    # 根本不调它。用哨兵让「万一被调到」立刻暴露，而非用签名不符的单参 lambda 掩盖回归。
+    def _should_not_run(cmd, timeout):
+        raise AssertionError("check_command=None 时不该调 runner")
+    passed, _ = a.validation_gate.verify(_should_not_run)
     assert passed is True
 
 

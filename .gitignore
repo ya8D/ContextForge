@@ -11,3 +11,6 @@ __pycache__/
 traces/
 log/
 .pytest_cache/
+# 本地代理在 API 出错时会把 debug log 落到项目根（形如 2026-07-10_13-59-22-690-debug.log），
+# 忽略掉，避免误提交。
+*-debug.log

@@ -109,43 +109,6 @@ def test_write_brand_new_file_succeeds(tmp_path):
     assert f.read_text(encoding="utf-8") == "内容"
 
 
-# ── 审查 #8：写测试文件掏空防护（check_test_deletion 已接进 write_file）──
-
-def test_write_gutting_test_file_rejected(tmp_path):
-    """覆盖测试文件时若删远多于加（掏空用例骗绿）→ 拒绝写入，原文件不动。"""
-    f = tmp_path / "test_foo.py"
-    original = "\n".join(f"def test_case_{i}(): assert True" for i in range(40))
-    f.write_text(original, encoding="utf-8")
-    rf: set = set()
-    read_file(str(f), _read_files=rf)                       # 先读（满足先读再改）
-    result = write_file(str(f), "def test_x(): pass", _read_files=rf)  # 40 行→1 行
-    assert result.startswith("[拒绝]")
-    assert "掏空" in result or "作弊" in result
-    assert f.read_text(encoding="utf-8") == original        # 原文件未被改动
-
-
-def test_write_normal_test_edit_allowed(tmp_path):
-    """测试文件正常增改（不是掏空）不受影响。"""
-    f = tmp_path / "test_bar.py"
-    f.write_text("def test_a(): assert True\ndef test_b(): assert True", encoding="utf-8")
-    rf: set = set()
-    read_file(str(f), _read_files=rf)
-    # 加一个用例（行数增加）→ 放行
-    result = write_file(str(f), "def test_a(): assert True\ndef test_b(): assert True\ndef test_c(): assert True",
-                        _read_files=rf)
-    assert result.startswith("[成功]")
-
-
-def test_write_gutting_non_test_file_allowed(tmp_path):
-    """非测试文件大幅删减不管（掏空判据只针对测试文件）。"""
-    f = tmp_path / "data.py"
-    f.write_text("\n".join(str(i) for i in range(40)), encoding="utf-8")
-    rf: set = set()
-    read_file(str(f), _read_files=rf)
-    result = write_file(str(f), "x = 1", _read_files=rf)
-    assert result.startswith("[成功]")
-
-
 # ── run_command 的错误兜底（不抛异常）────────────────────────
 
 def test_run_command_basic():
