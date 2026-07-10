@@ -19,6 +19,70 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
 
 ---
 
+## 严格安全审查：7 条确认缺陷（**真实 API/子进程**复现→修复→固化 e2e 回归）
+
+一次最严格的多 agent 对抗式审查（26 条原始发现→每条派独立 agent 尝试反驳→8 条证伪剔除，
+18 条确认）。**关键教训（用户驱动）**：初版复现用**假 client**（mock `messages.create`），那只是
+「按我理解的 API 契约模拟」，不算真实。遂全部推倒、stash 修复回到基线，用**真实 API / 真实子进程 /
+真实 `Agent.run()`** 重新复现每一条。真实测试推翻了几个凭空假设，也决定了 #2 不修。
+
+**真实复现结论**：
+- **#1 死循环打断留下未配对 tool_use → 真实 API 崩溃**（P0）：真调 API 证实——真实模型用「返回
+  暂时性、值得重试信号」的工具连调 3 轮触发 `is_looping()`，命中后只 append 纯文本不补 tool_result，
+  下一轮真实 API 拒绝：`tool_use ids were found without tool_result blocks`（**本地代理把上游 400
+  包成 `InternalServerError(500)`**，非我假设的 `BadRequestError`），穿到 run() except 整任务回滚崩溃。
+  **另一发现**：Opus 4.8 会主动拒绝无意义死循环（裸 `echo` 轮询一轮就看穿），只有「值得重试」的工具
+  信号才诱得出——假 client 让它看似轻易触发，真实中触发取决于工具是否诱导重试。
+- **#2 max_tokens 截断 →（本环境不可达，不修）**：真实探测发现**当前本地代理从不返回
+  `stop_reason=="max_tokens"`**（即使 `max_tokens=16` 也回 `end_turn`+截短内容，且忽略 `tool_choice`）。
+  故此隐患在本运行环境**不可达**，**不修**——只在 agent.py 留注释：日后换原生 Anthropic 端点需补处理。
+  （假 client 曾断言「API 返回 max_tokens+半截 tool_use」，是我凭空模拟的契约，真实不成立。）
+- **#3 run_command 丢退出码 → 验证门文本误判**（P1）：真实子进程证实两向——`py -c "sys.exit(1)"`
+  退出码 1、无关键词 → 误判「通过」放行真失败；`print("0 errors...")` 退出 0 含 error 字样 →
+  误判「未通过」打回。~~pytest 文件名含 error 致误判~~：**真实测试推翻**——`pytest -q` 安静模式
+  不打印测试文件名，此子项不成立、已删。
+- **#4 固定 30s 超时不可配**（P1）：真实 sleep(35) 触发超时，超时串被验证门当「测试失败」（实为「没跑完」）。
+- **#5 read_file 不过路径检查**（P2）：**真实 `Agent.run()` 端到端证实**——让真实模型读 hosts，
+  基线真的把系统文件内容读入上下文并返回（harness 全程没拦）。
+- **#6 check_path_safety 只做词法判断不归一化**（P2）：真实 `check_tool_call` 证实 `C:/Windows/...`
+  正斜杠、UNC `\\host\share` 等放行。
+- **#7 命令黑名单可绕过**（P2）：真实 `check_tool_call` 证实 `rm --recursive`、`find -delete`、
+  裸 `del *`、`r^m -rf`、`dd of=` 全放行。
+- **#8 check_test_deletion 是死代码**：grep 运行时代码证实只有定义、无调用；补的是验证门挡不住的
+  「删测试骗绿」盲区。
+
+**证伪剔除的 8 条**（避免误导，未修）：ThreadPoolExecutor 每轮新建（无正确性影响）、子 agent 成本
+「递归放大」（一层派生已硬封顶）、压缩后双 user 消息角色冲突（Anthropic 允许连续同角色）、
+compact_by_directive 保头假设被破坏（各路径 messages[0] 恒纯文本 user）、`git reset` whitespace 绕过、
+`/etc` 无尾斜杠漏拦（open 目录 IsADirectoryError）等。
+
+**修复**（`not e2e` 114 绿；真实 e2e 回归见 `tests/test_audit_fixes_e2e.py`，基线 7 红、修复后 7 绿）：
+
+- **#1（P0，agent.py）**：新增 `_pair_pending_tool_uses` 辅助——harness 决定**不执行**本轮工具时
+  （死循环打断），先补一条配对占位 `tool_result` 再注入换思路提示，消除下一轮 400。
+- **#2**：**不修**（本代理环境不可达，见上）。agent.py 留注释说明触发条件与换端点时的补法。
+- **#3/#4（P1，tools.py + harness.py）**：新增 `run_command_with_exit` 返回 `(退出码, 输出)`；
+  `ValidationGate.verify` 契约改为 `runner(cmd, timeout)->(code, out)`，**按退出码判**（0 通过 / 非 0 失败 /
+  None=超时异常视为未完成），文本关键词判据废弃。`run_command` 加 `_timeout` 带外参（默认 30，不进 schema）；
+  验证门默认 timeout 提到 300s（慢测试套件不被杀）。
+- **#5/#6（P2，harness.py）**：`check_tool_call` 把 **read_file 也纳入 `check_path_safety`**；
+  `check_path_safety` 比较前 `_normalize_path`（abspath+normcase）堵正斜杠/驱动器相对/CWD 相对/大小写绕过，
+  并保留「原始斜杠归一化」比对以维持 Unix 前缀跨平台命中；新增 UNC 拦截；禁区前缀补 `/root /var /lib`、
+  `c:\programdata`。
+- **#7（P2，harness.py）**：黑名单补 `rm --recursive/--force`、`find -delete`、`find -exec rm`、裸 `del *`、
+  `move`、`type nul>`、PowerShell `Remove-Item -Recurse/-Force`、`xargs rm`、`dd of=`、块设备 `nvme/hd/vd/mmcblk`；
+  并**拒绝 cmd.exe 混淆字符** `^ %VAR% 反引号 $()`（正则看不穿运行时展开，宁严勿漏）。
+- **#8（harness.py + tools.py）**：把原本悬空的 `check_test_deletion` **接进 write_file**——覆盖已存在测试文件时
+  比对新旧行数，疑似掏空则拒绝写入；顺带把判据从「整路径含 test」收紧为「文件名含 test」，避免父目录误判。
+- **测试**：新增 `tests/test_audit_fixes_e2e.py`（**单文件、真实 API/子进程/Agent 循环**，标 `e2e`）——
+  **基线未修复时 7 条全 fail 并打日志**（#1 打真实 500 报错、#5 打泄露的系统文件内容、#8 打「[成功]」掏空写入），
+  **修复后 7 条全 pass**，是「先复现后修复」的可执行凭证。跑法
+  `py -m pytest tests/test_audit_fixes_e2e.py -m e2e -v -s`。另 test_harness.py 改 4 个旧契约验证门测试 +
+  新增 8（路径归一化/UNC/read_file 纳入/命令补齐/混淆拒绝/设备族）；test_agent_logic.py +1（死循环补配对，
+  假 client 纯逻辑版，毫秒级不烧钱）；test_tools.py +3（掏空拒绝/正常增改放行/非测试文件不管）。临时复现脚本验证完即删。
+
+---
+
 ## 修 5 个真 bug（全局状态泄漏 / 并发 / 健壮性）+ 坦白设计缺口
 
 一份架构级 code review 揪出 12 个问题，逐条核对代码全部属实。修掉 5 个真 bug，各留说明；

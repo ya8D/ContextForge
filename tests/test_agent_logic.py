@@ -458,3 +458,62 @@ def test_run_rollback_survives_midtask_compaction():
     assert a.messages == before                    # 尽管中途压缩改写过，仍精确还原到干净历史
     assert not any(a.messages[i]["role"] == "user" and a.messages[i + 1]["role"] == "user"
                    for i in range(len(a.messages) - 1))
+
+
+# ── 审查 #1/#2：harness 不执行工具时必须补配对 tool_result（否则下一轮 API 400）──
+
+class _FakeTUBlock:
+    """仿 SDK 的 content block；type 可为 text / tool_use。"""
+    def __init__(self, type, **kw):
+        self.type = type
+        self.__dict__.update(kw)
+
+
+class _FakeUsage:
+    input_tokens = 10
+    output_tokens = 5
+    cache_read_input_tokens = 0
+    cache_creation_input_tokens = 0
+
+
+class _FakeResp:
+    def __init__(self, content, stop_reason):
+        self.content = content
+        self.stop_reason = stop_reason
+        self.usage = _FakeUsage()
+
+
+def _unpaired_tool_uses(messages):
+    """返回 messages 里所有「没有紧邻配对 tool_result」的 tool_use id（非空=会被 API 400）。"""
+    unpaired = []
+    for i, m in enumerate(messages):
+        if m["role"] != "assistant" or not isinstance(m["content"], list):
+            continue
+        tu_ids = [b.id for b in m["content"] if getattr(b, "type", None) == "tool_use"]
+        result_ids = set()
+        if i + 1 < len(messages) and messages[i + 1]["role"] == "user" \
+                and isinstance(messages[i + 1]["content"], list):
+            result_ids = {b.get("tool_use_id") for b in messages[i + 1]["content"]
+                          if isinstance(b, dict) and b.get("type") == "tool_result"}
+        unpaired += [t for t in tu_ids if t not in result_ids]
+    return unpaired
+
+
+def test_loop_break_pairs_pending_tool_uses(monkeypatch):
+    """审查 #1：死循环打断后，本轮未执行的 tool_use 必须有配对 tool_result，历史不留未配对块。"""
+    import unittest.mock as mock
+    monkeypatch.setenv("CONTEXTFORGE_TRACE", "off")
+    monkeypatch.setenv("CONTEXTFORGE_LOG", "off")
+    a = Agent(max_iterations=6)
+    n = {"i": 0}
+
+    def fake_create(**kw):
+        n["i"] += 1
+        # 每轮返回同一个工具调用（同命令）→ 连续 3 轮触发 is_looping
+        return _FakeResp([_FakeTUBlock("tool_use", id=f"c{n['i']}", name="run_command",
+                                       input={"command": "echo stuck"})], "tool_use")
+
+    with mock.patch.object(a.client.messages, "create", side_effect=fake_create):
+        a.run("反复卡同一个命令")     # 不应抛异常（补了配对就不会 400）
+    assert _unpaired_tool_uses(a.messages) == []
+

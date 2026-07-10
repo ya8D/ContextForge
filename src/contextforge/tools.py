@@ -113,17 +113,19 @@ def read_file(path: str, _read_files: set | None = None) -> str:
 
 
 @tool({"command": "要执行的完整 shell 命令，如 'ls -la'"})
-def run_command(command: str) -> str:
+def run_command(command: str, _timeout: int = 30) -> str:
     """执行一条 shell 命令并返回输出。用于列目录、查找文件、运行程序等。注意：Windows 环境，底层为 cmd.exe。"""
     # 注意：Phase 1/2 直接执行、无沙盒、无权限控制 —— 安全护栏留到 Phase 4 harness。
     # Windows 坑（Phase 1 记录）：shell=True 底层是 cmd.exe；某些命令（date/time）会等输入，
     # 故 stdin=DEVNULL 让它秒退不挂；中文输出是 GBK，故指定 encoding + errors="replace"。
+    # _timeout（下划线=带外注入，不进 schema、模型看不到）：默认 30s。验证门跑慢测试套件时
+    # 由调用方传更大值（审查 #4：原先硬编码 30s，>30s 的 pytest 套件会被杀、误判失败）。
     try:
         result = subprocess.run(
             command,
             shell=True,
             capture_output=True,
-            timeout=30,
+            timeout=_timeout,
             stdin=subprocess.DEVNULL,
             encoding=locale.getpreferredencoding(False),
             errors="replace",
@@ -131,9 +133,35 @@ def run_command(command: str) -> str:
         output = (result.stdout or "") + (result.stderr or "")
         return output.strip() or "[命令无输出]"
     except subprocess.TimeoutExpired:
-        return f"[错误] 命令超时（>30s）：{command}（可能在等待输入，或确实耗时过长）"
+        return f"[错误] 命令超时（>{_timeout}s）：{command}（可能在等待输入，或确实耗时过长）"
     except Exception as e:  # noqa: BLE001
         return f"[错误] 命令执行失败：{command} —— {e}"
+
+
+def run_command_with_exit(command: str, timeout: int = 30) -> tuple[int | None, str]:
+    """跑命令并返回 (退出码, 输出)。供验证门用——退出码是命令成败的**唯一可靠判据**。
+
+    审查 #3：run_command 只回字符串、吞掉 returncode，验证门被迫靠文本猜成败（把含
+    `test_error_x`/`0 errors` 的合格输出误判失败、把无关键词的真失败误判通过）。这里保留
+    退出码，让验证门优先按它判定。退出码为 None 表示命令根本没跑起来（超时/异常），
+    验证门应视为「未通过/不确定」。timeout 可配（同 #4）。
+    """
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            encoding=locale.getpreferredencoding(False),
+            errors="replace",
+        )
+        output = ((result.stdout or "") + (result.stderr or "")).strip() or "[命令无输出]"
+        return result.returncode, output
+    except subprocess.TimeoutExpired:
+        return None, f"[错误] 命令超时（>{timeout}s）：{command}（未跑完，无法判定成败）"
+    except Exception as e:  # noqa: BLE001
+        return None, f"[错误] 命令执行失败：{command} —— {e}"
 
 
 @tool({"path": "要写入的文件路径", "content": "要写入文件的完整内容"})
@@ -149,6 +177,24 @@ def write_file(path: str, content: str, _read_files: set | None = None) -> str:
     if os.path.exists(path) and norm not in read_files:
         return (f"[拒绝] 文件已存在但你还没读过它：{path}。"
                 f"请先用 read_file 读取，确认当前内容后再写，避免盲目覆盖。")
+    # 防「偷删测试骗绿」（审查 #8：把原本悬空的 check_test_deletion 接进运行时）：
+    # 覆盖一个已存在的测试文件时，比对新旧行数——若删远多于加、疑似把测试掏空，拒绝。
+    # 这补的正是验证门（按退出码判）也挡不住的盲区：删光用例后 pytest 仍退出 0「通过」。
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                old_lines = f.read().count("\n") + 1
+            new_lines = content.count("\n") + 1
+            from contextforge.harness import check_test_deletion
+            # 用「旧-新」近似删除行数、新增按 0 估（覆盖式写入无法精确算增删，够触发掏空判据）。
+            suspicious, reason = check_test_deletion(
+                path, lines_added=max(new_lines - old_lines, 0),
+                lines_deleted=max(old_lines - new_lines, 0))
+            if suspicious:
+                return (f"[拒绝] {reason}。疑似为让测试通过而删空测试——这是作弊。"
+                        f"若确需大幅精简测试，请说明理由或分步进行。")
+        except Exception:  # noqa: BLE001 —— 比对失败不该挡住正常写入，静默跳过防护即可
+            pass
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)

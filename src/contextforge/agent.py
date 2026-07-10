@@ -229,6 +229,23 @@ class Agent:
             self.messages[:] = _msgs_snapshot
             raise
 
+    def _pair_pending_tool_uses(self, tool_use_blocks, note: str) -> dict:
+        """给一组「未执行」的 tool_use 生成一条配对的 user(tool_result) 消息（审查 #1）。
+
+        Anthropic API 硬性要求：assistant 消息里每个 tool_use block，必须在紧邻的下一条 user
+        消息里有 tool_use_id 配对的 tool_result，否则下一轮请求直接被拒（真实复现：本地代理
+        以 InternalServerError(500) 包上游 400）。当 harness 决定**不执行**本轮工具（死循环打断）
+        时，这些 tool_use 已经进了历史，必须补一条占位 tool_result 把配对补齐，才能安全继续。
+        note 说明为何未执行。（日后若接原生端点、需处理 max_tokens 半截 tool_use，也可复用本辅助。）
+        """
+        return {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": b.id, "content": note}
+                for b in tool_use_blocks
+            ],
+        }
+
     def _run_loop(self) -> str:
         """TAOR 主循环本体（从 run() 抽出，便于 run() 在外层统一做失败回滚）。"""
         for i in range(1, self.max_iterations + 1):
@@ -278,6 +295,12 @@ class Agent:
                 if block.type == "text" and block.text.strip():
                     _log("💬 [模型]", block.text.strip())
 
+            # 注：审查曾提 #2「max_tokens 在 tool_use 中途截断→半截 tool_use 留在历史→下轮 400」。
+            # 但真实 API 复现证明：当前本地代理**从不返回 stop_reason=="max_tokens"**（即使
+            # max_tokens=16 也回 end_turn + 截短内容），故此隐患在本运行环境**不可达**，不加处理。
+            # 若日后换用原生 Anthropic 端点（真会返回 max_tokens），需在此补「补配对 tool_result +
+            # 打回」的处理（同 #1 的 _pair_pending_tool_uses 思路）。
+
             # ── 判断：模型是否要调工具？ ──
             if response.stop_reason != "tool_use":
                 # 模型不要工具了 —— 但先别急着放它走。
@@ -312,6 +335,13 @@ class Agent:
             self.loop_detector.record_round(tool_use_blocks)
             if self.loop_detector.is_looping():
                 _log("\n🔁 [死循环]", "连续多轮相同 action，注入换思路提示、打断。", level="error")
+                # 审查 #1：本轮的 tool_use 已在上面 append 进历史，但死循环分支不执行它们、
+                # 也没生成配对 tool_result。若直接 append 纯文本提示，下一轮就把
+                # 「assistant(tool_use)+user(纯文本)」发出 → Anthropic 400 `tool_use ids without
+                # tool_result`，穿到 run() except 整任务回滚失败——死循环「保护」反把任务弄崩。
+                # 故先补齐占位 tool_result 消除 400 隐患，再注入换思路提示。
+                self.messages.append(self._pair_pending_tool_uses(
+                    tool_use_blocks, "[被 harness 中断] 检测到死循环，本次工具调用未执行。"))
                 self.messages.append({
                     "role": "user",
                     "content": ("[死循环检测] 你连续多次重复了完全相同的操作但没有进展。"
@@ -417,14 +447,15 @@ class Agent:
         )
         return "".join(b.text for b in resp.content if b.type == "text")
 
-    def _run_check(self, command: str) -> str:
-        """验证门的 runner 回调：跑检查命令（如 pytest）拿输出。
+    def _run_check(self, command: str, timeout: int = 300) -> tuple[int | None, str]:
+        """验证门的 runner 回调：跑检查命令（如 pytest）拿 (退出码, 输出)。
 
-        复用 tools.run_command 执行——同 summarizer 注入思路：ValidationGate 只懂
+        复用 tools.run_command_with_exit——同 summarizer 注入思路：ValidationGate 只懂
         「验证的判据」，具体怎么跑命令由这个注入的回调完成，逻辑与副作用分离。
+        审查 #3/#4：返回退出码（成败唯一可靠判据）+ 可配 timeout（慢测试套件不被 30s 杀）。
         """
-        from contextforge.tools import run_command
-        return run_command(command)
+        from contextforge.tools import run_command_with_exit
+        return run_command_with_exit(command, timeout=timeout)
 
     def _summarize_via_subagent(self, prompt: str) -> str:
         """T5-A 执行者「subagent」：派一个带工具的子 agent 去做压缩摘要。

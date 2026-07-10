@@ -21,6 +21,7 @@ harness.py —— Harness 约束（给 TAOR 循环套护栏，对照 agent_learn
   而非预筛工具列表 —— 对单 agent 更实在。
 """
 
+import os
 import re
 from enum import Enum
 
@@ -50,16 +51,25 @@ TOOL_PERMISSIONS = {
 # 教学项目，宁可拦得严一点（宁可误拦让用户放行，也不要漏掉一个 rm -rf）。
 _DANGEROUS_COMMAND_PATTERNS = [
     (r"\brm\s+-[rf]", "rm -r/-f 递归或强制删除"),
+    (r"\brm\s+--(recursive|force)", "rm --recursive/--force 长选项删除"),  # 审查 #7：长选项绕过
     (r"\brmdir\b", "rmdir 删目录"),
     (r"\bdel\s+/[sqf]", "Windows del /s /q 批量删除"),
+    (r"\bdel\s+.*\*", "Windows del 通配删除"),          # 审查 #7：裸 del *.py 绕过
+    (r"\berase\s", "Windows erase 删除"),
+    (r"\bmove\s", "move 移动（可覆盖/搬走数据）"),        # 审查 #7
     (r"\bformat\b", "format 格式化磁盘"),
     (r"\bmkfs\b", "mkfs 格式化文件系统"),
-    (r"\bdd\s+if=", "dd 磁盘写入"),
+    (r"\bdd\b.*\bof=", "dd 磁盘写入（of= 目标，含 nvme/hd 等）"),  # 审查 #7：dd of=... 顺序/设备族
     (r":\(\)\s*\{.*\};", "fork bomb"),
     (r"\bshutdown\b", "shutdown 关机"),
     (r"\breboot\b", "reboot 重启"),
-    (r">\s*/dev/sd", "直写块设备"),
+    (r">\s*/dev/(sd|nvme|hd|vd|mmcblk)", "直写块设备"),   # 审查 #7：补 nvme/hd/vd/mmcblk
     (r"\bchmod\s+-r\s+777", "chmod -R 777 危险提权"),
+    (r"\bremove-item\b.*(-recurse|-force)", "PowerShell Remove-Item -Recurse/-Force"),  # 审查 #7
+    (r"\bfind\b.*-delete", "find -delete 递归删除"),      # 审查 #7
+    (r"\bfind\b.*-exec\s+rm", "find -exec rm 递归删除"),  # 审查 #7
+    (r"\btype\s+nul\s*>", "type nul > 截断文件"),          # 审查 #7：截空文件
+    (r"\bxargs\s+rm\b", "xargs rm 删除"),                 # 审查 #7
     # ── 会丢失 git 未提交工作的命令（真实事故：AI 曾 reset 掉半天工作）──
     # 只拦「会丢工作」的危险形态，不误伤安全用法（如 git checkout <分支名> 切分支是安全的）。
     (r"\bgit\s+reset\s+--hard", "git reset --hard 丢弃未提交改动"),
@@ -71,11 +81,40 @@ _DANGEROUS_COMMAND_PATTERNS = [
     (r"\bgit\s+push\s+.*-f\b", "git push -f 覆盖远端历史"),
 ]
 
-# 禁止触碰的系统目录前缀（路径遍历 / 写系统目录防护）。
-_FORBIDDEN_PATH_PREFIXES = [
-    "/etc/", "/usr/", "/bin/", "/sbin/", "/sys/", "/boot/", "/dev/",
-    "c:\\windows", "c:\\program files",
+# cmd.exe / shell 混淆元字符：出现即拒（审查 #7）。
+# 黑名单正则扫的是**展开前**的字符串，`r^m`（^ 是 cmd 转义、运行时被去）、`%A%`（变量展开）、
+# 反引号 / $() 命令替换都能让危险 token 在扫描时「隐身」、运行时才现形。无法用正则看穿展开，
+# 故直接**拒绝含这些混淆字符的命令**——正常命令用不到它们，代价可接受（教学项目宁严勿漏）。
+_OBFUSCATION_CHARS = [
+    ("^", "cmd.exe 转义符 ^（可拆散危险 token）"),
+    ("%", "cmd.exe 变量展开 %VAR%（可隐藏危险 token）"),
+    ("`", "反引号命令替换"),
+    ("$(", "$() 命令替换"),
 ]
+
+# 禁止触碰的系统目录前缀（路径遍历 / 写系统目录防护）。
+# ⚠️ 审查 #6：这里的判定必须配合 check_path_safety 里的**归一化**（abspath+normcase），否则
+# 正斜杠 `C:/Windows`、驱动器相对 `c:windows\x`、CWD 相对 `system32\x`、其它盘符都能绕过。
+# 前缀本身用小写反斜杠形态（Windows）/ 小写正斜杠（Unix），与 normcase 后的路径对齐。
+_FORBIDDEN_PATH_PREFIXES = [
+    # Unix 系统目录
+    "/etc/", "/usr/", "/bin/", "/sbin/", "/sys/", "/boot/", "/dev/",
+    "/root/", "/var/", "/lib/",
+    # Windows 系统目录（normcase 会把盘符与分隔符归一成小写反斜杠）
+    "c:\\windows", "c:\\program files", "c:\\programdata",
+]
+
+
+def _normalize_path(path: str) -> str:
+    """把路径归一化成可靠比较的形态：转绝对路径 + 统一分隔符/大小写（审查 #6）。
+
+    os.path.abspath 会：① 把相对/驱动器相对路径按 CWD 展开成绝对路径（堵住 `system32\\x`
+    这种 CWD 相对绕过）；② 把正斜杠统一成平台分隔符（Windows 上 `C:/Windows` → `C:\\Windows`）。
+    os.path.normcase 再转小写（Windows 大小写不敏感），与小写前缀对齐。
+    注：abspath 不解析符号链接/junction（那需要 realpath、且要求路径真实存在）；对本教学项目，
+    堵住正斜杠/驱动器相对/CWD 相对/大小写这些**无需落盘即可判定**的绕过已是主要收益。
+    """
+    return os.path.normcase(os.path.abspath(path))
 
 
 def check_command_safety(command: str) -> tuple[bool, str]:
@@ -86,6 +125,11 @@ def check_command_safety(command: str) -> tuple[bool, str]:
     只拦真正危险的。命中危险模式 → 拒绝执行（返回 False），否则放行。
     """
     lowered = command.lower()
+    # 先拒混淆元字符（^ / %VAR% / 反引号 / $()）——它们能让危险 token 在扫描时隐身、运行时才现形，
+    # 正则无法看穿展开（审查 #7）。正常命令用不到，宁严勿漏。
+    for ch, desc in _OBFUSCATION_CHARS:
+        if ch in command:
+            return False, f"命中混淆字符「{desc}」"
     for pattern, desc in _DANGEROUS_COMMAND_PATTERNS:
         if re.search(pattern, lowered):
             return False, f"命中危险命令模式「{desc}」"
@@ -96,12 +140,27 @@ def check_path_safety(path: str) -> tuple[bool, str]:
     """检查一个文件路径是否安全（路径遍历 + 系统目录防护）。返回 (是否放行, 原因)。
 
     对照书里 FileWriteParams 的 validate_path：禁 `..` 路径遍历、禁写系统目录。
+    审查 #6 修正：比较前先 _normalize_path（abspath+normcase）——否则正斜杠 `C:/Windows`、
+    驱动器相对 `c:windows\\x`、CWD 相对 `system32\\x`、其它盘符都能绕过纯字符串前缀匹配。
+    UNC 网络路径（\\\\host\\share）单独拦：不该往远程共享读写。
     """
     if ".." in path:
         return False, "路径含 `..`，禁止路径遍历"
-    lowered = path.lower()
+    # UNC 网络路径（\\host\share 或 //host/share）：拦，防往远程共享读写（审查 #6）。
+    if path.startswith("\\\\") or path.startswith("//"):
+        return False, "禁止 UNC 网络路径（\\\\host\\share）"
+    # 两种形态都比对，任一命中即拦（审查 #6）：
+    #   ① abspath+normcase 后的绝对路径——堵 CWD 相对 / 驱动器相对 / 正斜杠 / 大小写绕过（主要修复）。
+    #   ② 原始路径仅统一斜杠+小写（不 abspath）——保住「Unix 风格绝对路径 /etc/... 在任何平台都拦」
+    #      的跨平台意图；否则 Windows 上 abspath 会把 /etc 展开成当前盘符 C:\etc、Unix 前缀永不命中。
+    norm_abs = _normalize_path(path)
+    norm_raw = path.replace("/", os.sep).lower()
     for prefix in _FORBIDDEN_PATH_PREFIXES:
-        if lowered.startswith(prefix):
+        # Unix 前缀用正斜杠形态比原始路径；Windows 前缀已是反斜杠形态。两种归一化都试。
+        prefix_raw = prefix.replace("\\", os.sep)
+        unix_prefix = prefix.replace("\\", "/")
+        if (norm_abs.startswith(prefix) or norm_raw.startswith(prefix_raw)
+                or path.lower().startswith(unix_prefix)):
             return False, f"禁止触碰系统目录：{prefix}"
     return True, "安全"
 
@@ -114,9 +173,12 @@ def check_tool_call(name: str, tool_input: dict) -> tuple[bool, str]:
     """
     if name == "run_command":
         return check_command_safety(tool_input.get("command", ""))
-    if name == "write_file":
+    if name in ("write_file", "read_file"):
+        # 审查 #5：read_file 原先落兜底放行、完全不过路径检查——read_file("/etc/shadow") /
+        # C:/Windows/System32/config/SAM / ../../../.env 会把敏感文件读入模型上下文。只读也能泄密，
+        # 故与 write_file 一样过 check_path_safety（禁 `..`/系统目录/UNC）。
         return check_path_safety(tool_input.get("path", ""))
-    # read_file 只读，天然安全；未知工具交给 execute_tool 去报「未知工具」。
+    # 未知工具交给 execute_tool 去报「未知工具」。
     return True, "安全"
 
 
@@ -193,15 +255,18 @@ class LoopDetector:
 # ─────────────────────────────────────────────────────────────
 
 # 检测「测试文件被删/大幅删减」的常见作弊模式（对照书 _check_test_deletions）。
-# ⚠️ 注意：本函数**已实现且有单测，但未接入运行时**（agent.py 的验证门只跑检查命令、
-#    不调本函数）。保留它是因为它是一个真实、独立可用的检测；是否接进 TAOR 循环留待日后。
+# 审查 #8：本函数已从「悬空未接入」改为**接进运行时**——tools.write_file 覆盖已存在的测试文件时
+#    会比对新旧行数并调用它，疑似掏空则拒绝写入。补的正是验证门（按退出码判）也挡不住的盲区：
+#    删光用例后 pytest 仍退出 0「通过」。
 def check_test_deletion(file_path: str, lines_added: int, lines_deleted: int) -> tuple[bool, str]:
     """检测一次写文件是否像「偷删测试来让测试过」。返回 (是否可疑, 原因)。
 
     作弊模式：改的是测试文件，且删的行数远多于加的行数（把测试内容掏空）。
     这是书里点名的「AI 常见作弊」——嘴上说测试过了，其实把测试删了。
+    只看**文件名**是否含 test（而非整个路径），避免父目录恰好含 "test"（如 pytest 临时目录）误判。
     """
-    if "test" not in file_path.lower():
+    basename = os.path.basename(file_path).lower()
+    if "test" not in basename:
         return False, "非测试文件"
     if lines_deleted > lines_added * 2 and lines_deleted > 5:
         return True, f"测试文件 {file_path} 删 {lines_deleted} 行仅加 {lines_added} 行，疑似掏空测试"
@@ -221,21 +286,30 @@ class ValidationGate:
     （同 context.py 的 summarizer 注入思路：纯逻辑可测，副作用隔离）。
     """
 
-    def __init__(self, check_command: str | None = None):
+    def __init__(self, check_command: str | None = None, timeout: int = 300):
         # 任务的完成判据命令（如 "py -m pytest -q"）。None = 不验证。
         self.check_command = check_command
+        # 验证门跑检查命令的超时（秒）。审查 #4：测试套件常 >30s，给它一个宽松默认（5 分钟），
+        # 与模型自己调 run_command 的 30s 分开——那是防挂死，这是等测试跑完。
+        self.timeout = timeout
 
     def verify(self, runner) -> tuple[bool, str]:
-        """跑检查命令验证任务是否真完成。runner(command)->输出字符串。
+        """跑检查命令验证任务是否真完成。
 
-        返回 (是否通过, 报告)。约定：检查输出里含 "FAIL"/"Error"/"错误"（不区分大小写）
-        视为未通过。没配检查命令时直接放行（无条件通过）。
+        runner(command, timeout) -> (退出码, 输出字符串)。退出码是命令成败的**唯一可靠判据**
+        （审查 #3）：0=通过，非 0=失败，None=没跑起来（超时/异常）视为未通过。
+        文本关键词判据仅在**拿不到退出码**时（None）作兜底提示，不再作为主判据——原先裸子串
+        匹配 fail/error 会把含 `test_error_x`/`0 errors` 的合格输出误判失败、把无关键词的真失败
+        误判通过（语义两个方向都会错）。
+
+        返回 (是否通过, 报告)。没配检查命令时直接放行（无条件通过）。
         """
         if not self.check_command:
             return True, "未配置检查命令，跳过验证"
-        output = runner(self.check_command)
-        low = output.lower()
-        # 简单判据：输出里出现失败/错误关键词 → 未通过。教学项目够用。
-        if "fail" in low or "error" in low or "错误" in low or "[未" in output:
-            return False, f"验证未通过：\n{output}"
-        return True, f"验证通过：\n{output}"
+        exit_code, output = runner(self.check_command, self.timeout)
+        if exit_code == 0:
+            return True, f"验证通过（退出码 0）：\n{output}"
+        if exit_code is None:
+            # 命令没跑起来（超时/异常）——不是「测试失败」，是「没跑完」，如实说明并打回。
+            return False, f"验证未完成（命令未正常结束，如超时/异常）：\n{output}"
+        return False, f"验证未通过（退出码 {exit_code}）：\n{output}"

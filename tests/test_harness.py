@@ -81,6 +81,66 @@ def test_normal_paths_allowed():
     assert check_path_safety("C:/AI_learning/myagent/x.py")[0] is True
 
 
+# ── 审查 #6：路径归一化后的绕过防护 ──
+
+def test_forward_slash_windows_system_path_blocked():
+    """正斜杠形式的 Windows 系统路径也被拦（归一化 abspath 会转成反斜杠再比对）。"""
+    assert check_path_safety("C:/Windows/System32/drivers/etc/hosts")[0] is False
+    assert check_path_safety("C:/ProgramData/x")[0] is False
+
+
+def test_unc_path_blocked():
+    """UNC 网络路径被拦（防往远程共享读写/投毒）。"""
+    assert check_path_safety("\\\\attacker-host\\share\\payload")[0] is False
+    assert check_path_safety("//host/share/x")[0] is False
+
+
+def test_unix_system_paths_blocked_cross_platform():
+    """Unix 风格系统绝对路径在任何平台都拦（不因 Windows abspath 展开成当前盘符而漏）。"""
+    for p in ["/etc/hosts", "/root/.ssh/authorized_keys", "/var/lib/x", "/usr/bin/x"]:
+        assert check_path_safety(p)[0] is False, f"未拦：{p}"
+
+
+# ── 审查 #5：read_file 也过路径检查 ──
+
+def test_read_file_now_path_checked():
+    """read_file 不再天然放行——系统路径 / 路径遍历 / UNC 都拦（只读也能泄密）。"""
+    assert check_tool_call("read_file", {"path": "C:/Windows/System32/config/SAM"})[0] is False
+    assert check_tool_call("read_file", {"path": "../../../.env"})[0] is False
+    assert check_tool_call("read_file", {"path": "\\\\host\\share\\x"})[0] is False
+    # 正常项目内路径仍放行
+    assert check_tool_call("read_file", {"path": "src/foo.py"})[0] is True
+
+
+# ── 审查 #7：命令黑名单补齐 + 混淆字符拒绝 ──
+
+def test_more_destructive_commands_blocked():
+    """审查 #7 补齐：长选项 / find -delete / 裸 del* / move / type nul> / PowerShell / dd of= 等都拦。"""
+    for cmd in ["rm --recursive --force x", "rm --force y",
+                "find . -delete", "find /proj -exec rm {} +",
+                "del *.py", "move C:\\important\\* C:\\Temp",
+                "type nul > important.txt",
+                "powershell -c Remove-Item -Recurse -Force C:\\proj",
+                "dd of=/dev/nvme0n1 if=/dev/zero", "xargs rm foo"]:
+        ok, _ = check_command_safety(cmd)
+        assert ok is False, f"危险命令未被拦：{cmd}"
+
+
+def test_obfuscation_chars_rejected():
+    """审查 #7：cmd.exe 混淆字符（^ / %VAR% / 反引号 / $()）出现即拒——运行时才现形的危险 token。"""
+    for cmd in ["r^m -rf x", "set A=rm&& %A% -rf data",
+                "echo `rm -rf x`", "$(rm -rf x)"]:
+        ok, _ = check_command_safety(cmd)
+        assert ok is False, f"混淆命令未被拦：{cmd}"
+
+
+def test_device_write_families_blocked():
+    """审查 #7：直写块设备补 nvme/hd/vd/mmcblk（原只拦 sd）。"""
+    for cmd in ["dd of=/dev/nvme0n1 if=/dev/zero", "echo x > /dev/nvme0n1",
+                "cat y > /dev/hda"]:
+        assert check_command_safety(cmd)[0] is False, f"未拦：{cmd}"
+
+
 def test_check_tool_call_routing():
     """统一关卡按工具类型路由到对应检查。"""
     # run_command 走命令检查
@@ -222,34 +282,55 @@ def test_check_test_deletion_allows_normal_edit():
 def test_validation_gate_no_command_passes():
     """没配检查命令 → 无条件放行（纯问答不添乱）。"""
     gate = ValidationGate(check_command=None)
-    passed, _ = gate.verify(lambda cmd: "不该被调用")
+    passed, _ = gate.verify(lambda cmd, timeout: (0, "不该被调用"))
     assert passed is True
 
 
-def test_validation_gate_passes_on_clean_output():
-    """配了命令、输出干净（无 fail/error）→ 通过。用假 runner 不烧钱。"""
+def test_validation_gate_passes_on_exit_zero():
+    """配了命令、退出码 0 → 通过（审查 #3：按退出码判，不再靠文本关键词）。用假 runner 不烧钱。"""
     gate = ValidationGate(check_command="pytest -q")
-    passed, report = gate.verify(lambda cmd: "5 passed in 0.1s")
+    passed, report = gate.verify(lambda cmd, timeout: (0, "5 passed in 0.1s"))
     assert passed is True
     assert "验证通过" in report
 
 
-def test_validation_gate_fails_on_error_output():
-    """配了命令、输出含失败关键词 → 不通过、打回。"""
+def test_validation_gate_fails_on_nonzero_exit():
+    """配了命令、退出码非 0 → 不通过、打回（审查 #3）。"""
     gate = ValidationGate(check_command="pytest -q")
-    passed, report = gate.verify(lambda cmd: "1 failed, 4 passed\nFAILED test_x")
+    passed, report = gate.verify(lambda cmd, timeout: (1, "1 failed, 4 passed"))
     assert passed is False
     assert "未通过" in report
 
 
-def test_validation_gate_runner_receives_command():
-    """验证门确实把配置的检查命令传给了 runner。"""
+def test_validation_gate_passes_despite_error_word_in_output():
+    """审查 #3 回归：退出码 0 但输出含 'error'/'0 errors' 字样 → 仍判通过，不再误打回。
+
+    原裸子串匹配会把含 '0 errors'、'no errors'、warnings 段这类合格输出误判失败。
+    （真实复现修正：`pytest -q` 安静模式不打印测试文件名，故「文件名含 error 致误判」不成立、不断言。）
+    """
+    gate = ValidationGate(check_command="pytest -q")
+    passed, _ = gate.verify(lambda cmd, timeout: (0, "5 passed\n0 errors, all checks passed"))
+    assert passed is True
+
+
+def test_validation_gate_timeout_is_not_completed():
+    """审查 #4 回归：命令超时/异常（退出码 None）→ 判「未完成」而非「测试失败」，打回。"""
+    gate = ValidationGate(check_command="pytest -q")
+    passed, report = gate.verify(lambda cmd, timeout: (None, "[错误] 命令超时"))
+    assert passed is False
+    assert "未完成" in report or "未正常结束" in report
+
+
+def test_validation_gate_runner_receives_command_and_timeout():
+    """验证门确实把配置的检查命令 + 超时传给了 runner（审查 #3/#4：新 2 参 + 元组返回契约）。"""
     captured = {}
 
-    def capturing_runner(cmd: str) -> str:
+    def capturing_runner(cmd: str, timeout: int):
         captured["cmd"] = cmd
-        return "ok passed"
+        captured["timeout"] = timeout
+        return (0, "ok passed")
 
-    gate = ValidationGate(check_command="py -m pytest -q")
+    gate = ValidationGate(check_command="py -m pytest -q", timeout=600)
     gate.verify(capturing_runner)
     assert captured["cmd"] == "py -m pytest -q"
+    assert captured["timeout"] == 600
