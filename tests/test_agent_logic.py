@@ -517,3 +517,44 @@ def test_loop_break_pairs_pending_tool_uses(monkeypatch):
         a.run("反复卡同一个命令")     # 不应抛异常（补了配对就不会 400）
     assert _unpaired_tool_uses(a.messages) == []
 
+
+def test_loop_rejects_dangerous_command_and_feeds_back(monkeypatch):
+    """P4 循环内权限拦截（纯逻辑版，钉死连线，不受模型意愿影响）。
+
+    背景：e2e 版 test_harness_blocks_dangerous_command 依赖「真实模型愿意去调危险命令」，
+    但 Opus 会自查/拒绝作死，导致 harness 没机会触发、断言偶发红（本轮审查发现）。
+    「拦截 + 回喂 is_error」这条**循环内**连线本身是确定性的，用假 client 直接钉死：
+    第 1 轮假模型请求一个危险命令（git reset --hard）→ 循环应拦下、回喂「被 harness 拒绝」、
+    **不真执行**；第 2 轮假模型 end_turn 收尾。断言：历史里有拒绝回喂、且循环没崩正常返回。
+    """
+    import unittest.mock as mock
+    monkeypatch.setenv("CONTEXTFORGE_TRACE", "off")
+    monkeypatch.setenv("CONTEXTFORGE_LOG", "off")
+    a = Agent(max_iterations=4)
+    n = {"i": 0}
+
+    def fake_create(**kw):
+        n["i"] += 1
+        if n["i"] == 1:
+            # 第 1 轮：请求一个 harness 必拦的危险命令
+            return _FakeResp([_FakeTUBlock("tool_use", id="d1", name="run_command",
+                                           input={"command": "git reset --hard HEAD"})], "tool_use")
+        # 第 2 轮：拿到拒绝回喂后收尾
+        return _FakeResp([_FakeTUBlock("text", text="好的，该命令被拒绝，我不执行了。")], "end_turn")
+
+    with mock.patch.object(a.client.messages, "create", side_effect=fake_create):
+        final = a.run("帮我 git reset --hard")
+
+    # ① 循环没崩，正常返回
+    assert isinstance(final, str) and final.strip()
+    # ② 历史里有「被 harness 拒绝」回喂（拦截真的在循环里触发并回喂）
+    saw_rejection = any(
+        isinstance(b, dict) and b.get("type") == "tool_result"
+        and "被 harness 拒绝" in str(b.get("content", ""))
+        for m in a.messages if isinstance(m.get("content"), list)
+        for b in m["content"]
+    )
+    assert saw_rejection, "循环没把危险命令的拒绝回喂进历史 —— 权限拦截连线断了"
+    # ③ 危险命令的 tool_use 仍有配对 tool_result（拒绝也要配对，否则下轮 400）
+    assert _unpaired_tool_uses(a.messages) == []
+
