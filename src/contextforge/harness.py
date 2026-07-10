@@ -31,15 +31,22 @@ from enum import Enum
 # ─────────────────────────────────────────────────────────────
 
 class PermissionLevel(Enum):
-    """工具权限级别（对照书 8.2 支柱二）。数字越大越危险。"""
+    """工具权限级别（对照书 8.2 支柱二）。数字越大越危险。
+
+    ⚠️ 占位 / 教学锚点：本枚举**不驱动任何运行时行为**。它只是把教材「支柱二 权限分级」的
+    形态摆出来做对照——见下方 TOOL_PERMISSIONS 的说明。实际拦截走 check_command_safety /
+    check_path_safety（运行时细粒度），不查等级。保留是为「对照教材」，不是为拦截。
+    """
     READ_ONLY = 1          # 只读，最安全（read_file）
     WRITE_SAFE = 2         # 可写，但可控（write_file，且有先读再改约束）
     WRITE_DESTRUCTIVE = 3  # 可能删/改重要数据，需拦截或确认（run_command 能跑任意命令）
 
 
-# 每个工具的权限级别。run_command 能跑任意 shell → 最危险。
-# 注意：这是「工具级」的粗分级；真正的细粒度拦截在 check_command_safety 里做
-# （因为 run_command 大部分用法安全，只有少数命令危险，不能一刀切禁掉）。
+# ⚠️ 占位 / 教学锚点（不驱动行为）：这张「工具→危险等级」表**运行时从不被查**——
+# check_tool_call 按工具名分发到 check_command_safety / check_path_safety 做细粒度拦截，
+# 跟这张粗分级表是两条独立的路。保留它纯为对照教材「支柱二：按等级预筛工具」的多 agent 做法，
+# 并对比出「本项目单 agent、就 3 个工具，故选运行时拦截而非预筛」这一决策。除测试外无引用。
+# TODO（若哪天真要按等级预筛）：让 check_tool_call 先查本表、对 WRITE_DESTRUCTIVE 走更严策略。
 TOOL_PERMISSIONS = {
     "read_file": PermissionLevel.READ_ONLY,
     "write_file": PermissionLevel.WRITE_SAFE,
@@ -212,8 +219,10 @@ class LoopDetector:
     def record(self, name: str, tool_input: dict) -> None:
         """记录一次单工具 action。只保留最近 max_same 个，够判断即可。
 
-        注：agent 主循环用的是 record_round（整轮），这个单工具版保留供
-        「一轮只有一个工具」的简单场景 / 单元测试直接调用。
+        ⚠️ 占位 / 教学锚点（生产不用）：agent 主循环用的是 record_round（整轮指纹，修掉了
+        「只看第一个工具」的漏报/误报，见 record_round 注释与 PROGRESS 的演进记录）。本单工具版
+        **仅被单元测试直接调用**，保留作「先有单工具版、后演进到整轮」这段认知的对照。除测试外无引用。
+        TODO（若真出现「一轮固定只有一个工具」的简化场景）：可直接复用它，语义与 record_round 一致。
         """
         fp = self._fingerprint(name, tool_input)
         self._recent.append(fp)

@@ -205,6 +205,22 @@ def test_check_command_default_none_skips_gate(monkeypatch):
     assert passed is True
 
 
+def test_explicit_none_check_command_opts_out_over_env(monkeypatch):
+    """显式 check_command=None **压过**环境变量 → 关掉验证门（子 agent 就靠这个不继承）。
+
+    回归防护：`__init__` 曾用 `check_command or os.environ.get(...)`，`None or env` 会落到 env，
+    导致「显式传 None 想关掉」被环境变量悄悄覆盖——子 agent 因此继承主任务的 check_command、
+    被无关检查命令反复打回撞 max_iterations。改用哨兵区分「没传」与「显式 None」后此处必须为 None。
+    """
+    monkeypatch.setenv("CONTEXTFORGE_CHECK_COMMAND", "env_should_be_ignored")
+    a = Agent(check_command=None)          # 显式关掉
+    assert a.check_command is None, "显式 None 被环境变量覆盖了（哨兵区分失效）"
+    assert a.validation_gate.check_command is None
+    # 对照：不传才读环境
+    b = Agent()
+    assert b.check_command == "env_should_be_ignored"
+
+
 # ── 压缩触发阈值：显式 > CONTEXTFORGE_COMPACT_THRESHOLD > 默认（支撑 Chromium 大上下文）──
 
 def test_compact_threshold_default(monkeypatch):

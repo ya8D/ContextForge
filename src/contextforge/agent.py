@@ -135,9 +135,14 @@ class Agent:
     # 单调计数器进程内绝不重复，且零随机性（符合项目「不用 random/uuid」的风格）。
     _instance_seq = itertools.count()
 
+    # 哨兵：区分「check_command 没传」（走环境变量兜底）和「显式传 None」（明确不要验证门）。
+    # 用 `or` 链做兜底时，`None or env` 会落到 env，无法表达「显式关掉」——子 agent 正需要显式
+    # 关掉验证门（不继承主任务/环境的 check_command）。故用一个独一无二的哨兵对象区分两者。
+    _UNSET = object()
+
     def __init__(self, model: str | None = None, max_iterations: int = 100,
                  compact_threshold: int | None = None,
-                 check_command: str | None = None,
+                 check_command=_UNSET,
                  tools: list | None = None,
                  compact_directive: str | None = None,
                  compact_executor: str | None = None):
@@ -168,10 +173,13 @@ class Agent:
         # ② 死循环检测：连续 3 次相同 action 就判定鬼打墙、注入换思路提示。
         self.loop_detector = LoopDetector(max_same=3)
         # ③ 验证门：若任务配了检查命令（如 pytest），声称完成前强制跑一遍。
-        # 优先级：显式传参 > 环境变量 CONTEXTFORGE_CHECK_COMMAND（写 .env 持久生效）> None（跳过）。
-        # 与 compact_directive 读 CONTEXTFORGE_COMPACT_DIRECTIVE 同款兜底。存一份到实例，
-        # 供 CLI /check 查看/复用（门本身的 check_command 是构造时定的只读字段）。
-        self.check_command = check_command or os.environ.get("CONTEXTFORGE_CHECK_COMMAND") or None
+        # 优先级：显式传参（含显式 None=明确不要）> 环境变量 CONTEXTFORGE_CHECK_COMMAND > None（跳过）。
+        # 用哨兵区分「没传」和「显式 None」：没传才读环境变量兜底；显式 None 直接关掉验证门
+        # （子 agent 就靠这个不继承主任务/环境的 check_command）。存一份到实例供 CLI /check 查看/复用。
+        if check_command is Agent._UNSET:
+            self.check_command = os.environ.get("CONTEXTFORGE_CHECK_COMMAND") or None
+        else:
+            self.check_command = check_command or None
         self.validation_gate = ValidationGate(check_command=self.check_command)
         # 对话历史：TAOR 每一轮的「所见所想所做」都累积在这里。
         self.messages: list[dict] = []
@@ -468,6 +476,10 @@ class Agent:
         sub = Agent(
             tools=subagent_tool_schemas(),
             max_iterations=15,
+            # 验证门是**主任务**概念：子 agent 只是去做个小活（回读核实），不该继承主任务的
+            # check_command。若不显式传 None，它会回退读 CONTEXTFORGE_CHECK_COMMAND 环境变量，
+            # 被无关的检查命令（如 pytest）反复打回、撞 max_iterations 返回垃圾结论。
+            check_command=None,
         )
         task = (
             "你是一个上下文压缩助手。下面给你一段 agent 的中间对话历史和压缩要求。"
@@ -554,9 +566,12 @@ def spawn_subagent(task: str) -> str:
     """
     # 子 agent 用**受限工具集**（剔除 spawn_subagent，防无限递归派生），
     # 且给更小的 max_iterations —— 子任务不该像主任务跑那么多轮，防子 agent 自己失控。
+    # check_command=None：验证门是主任务概念，子 agent 不该继承（否则回退读环境变量 CONTEXTFORGE_
+    # CHECK_COMMAND，被无关检查命令反复打回、撞 max_iterations 返回垃圾结论）。
     sub = Agent(
         tools=subagent_tool_schemas(),
         max_iterations=15,
+        check_command=None,
     )
     result = sub.run(task)
     # 只回传最终结论。子 agent 的完整历史（sub.messages）留在它自己那里，不回灌主 agent。

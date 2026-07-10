@@ -14,3 +14,5 @@ log/
 # 本地代理在 API 出错时会把 debug log 落到项目根（形如 2026-07-10_13-59-22-690-debug.log），
 # 忽略掉，避免误提交。
 *-debug.log
+# 02_compaction_demo.py 造的临时大文件（40 个），跑完可删，别进库。
+tests/_compaction_demo_files/

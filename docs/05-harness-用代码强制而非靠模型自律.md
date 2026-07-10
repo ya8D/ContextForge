@@ -27,8 +27,8 @@ ContextForge 的 harness 有几根柱子，都是这个模式：
 模型想 `write_file` 一个已存在的文件？先检查它读过没有——没读过就直接拒绝，请求到不了写盘：
 
 ```python
-# tools.py：write_file
-if os.path.exists(path) and norm not in READ_FILES:
+# tools.py：write_file（read_files 是带外注入的 Agent 实例状态 self.read_files）
+if os.path.exists(path) and norm not in read_files:
     return (f"[拒绝] 文件已存在但你还没读过它：{path}。"
             f"请先用 read_file 读取，确认当前内容后再写，避免盲目覆盖。")
 ```
