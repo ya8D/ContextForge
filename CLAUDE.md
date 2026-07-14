@@ -20,6 +20,10 @@
 - **语言**：所有交流、注释、文档一律用**中文**。
 - **模型 API**：Anthropic (Claude) Python SDK。
 - **不用框架**：不引入 LangChain / LangGraph，编排逻辑全部自己写。
+- **开发走 feature 分支 + PR，绝不直接碰 main**：所有改动在 `feat/<任务>` 分支上做（如
+  `feat/p3-compact-keep-user-msgs`），AI 负责 commit、推 feature 分支、`gh pr create` 开 PR；
+  **main 的更新只能由用户在 GitHub 上 review 后合并 PR**——AI 不 push main、不合并 PR（用户练
+  review、把关合并）。commit 由 AI 做（本地可逆），push 仅限 feature 分支。
 - **模型 ID 从环境读，绝不写死**：用 `os.environ.get("ANTHROPIC_MODEL")`。
   当前环境由 VSCode Copilot 注入以下变量，SDK 自动读取，**无需 `.env`**：
   - `ANTHROPIC_AUTH_TOKEN`（鉴权）
