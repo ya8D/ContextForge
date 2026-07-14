@@ -34,7 +34,13 @@ from contextforge.context import (
     should_compact,
 )
 from contextforge.harness import LoopDetector, ValidationGate, check_tool_call
-from contextforge.tools import TOOL_SCHEMAS, execute_tool, subagent_tool_schemas, tool
+from contextforge.tools import (
+    TOOL_SCHEMAS,
+    execute_tool,
+    is_concurrency_safe,
+    subagent_tool_schemas,
+    tool,
+)
 
 # 加载项目根的 .env（代理凭据：ANTHROPIC_AUTH_TOKEN / BASE_URL / MODEL）。
 # 这套凭据由 VSCode 扩展注入其子进程，普通终端拿不到，故落到本地 .env。
@@ -372,18 +378,28 @@ class Agent:
                 else:
                     _log("🛡️ [权限]", f"拦截 {block.name} 参数={block.input} —— {reason}", level="error")
 
-            # 并行执行放行的工具（对照第 15.2 节 并行工具调用）。
+            # 执行放行的工具（P1：按并发安全分批）。对照 Claude Code toolOrchestration：
+            # 只读工具（is_concurrency_safe=True，如 read_file）可安全并发；有副作用的
+            # （write_file/run_command/spawn_subagent）**串行**、按模型给出的原始顺序逐个执行——
+            # 否则同轮并行写同一文件是竞态，最终内容由线程调度决定、不确定（TODO P1 实证）。
             executed: dict = {}  # block.id -> 执行结果
-            if to_execute:
+            safe_batch = [b for b in to_execute if is_concurrency_safe(b.name)]
+            unsafe_batch = [b for b in to_execute if not is_concurrency_safe(b.name)]
+
+            # 只读安全批：并发执行（read_files 带外注入本实例的「已读集合」——read_file/write_file
+            # 收到它，别的工具忽略；每个 Agent 各写各的 set，并发不竞态、子 agent 不泄漏）。
+            if safe_batch:
                 with ThreadPoolExecutor(max_workers=8) as pool:
                     results = list(pool.map(
-                        # read_files 带外注入本实例的「已读集合」——read_file/write_file 收到它，
-                        # 别的工具忽略。每个 Agent 各写各的 set，并行不竞态、子 agent 不泄漏。
                         lambda b: execute_tool(b.name, b.input, read_files=self.read_files),
-                        to_execute,
+                        safe_batch,
                     ))
-                for b, r in zip(to_execute, results):
+                for b, r in zip(safe_batch, results):
                     executed[b.id] = r
+
+            # 有副作用批：按原始顺序串行执行（不并发，消除同轮写竞态）。
+            for b in unsafe_batch:
+                executed[b.id] = execute_tool(b.name, b.input, read_files=self.read_files)
 
             # 组装每个 tool_use 的结果：放行的用真实执行结果，被拦的用拒绝说明。
             tool_results = []

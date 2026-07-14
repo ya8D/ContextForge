@@ -24,12 +24,16 @@ import subprocess
 #   TOOL_SCHEMAS  ：给模型看的说明书列表（Anthropic 的 name/description/input_schema）
 TOOL_FUNCTIONS: dict = {}
 TOOL_SCHEMAS: list = []
+# 工具名 → 是否「并发安全」（P1）：只读工具并发安全（read_file），有副作用的不安全
+# （write_file/run_command 会改磁盘/跑命令，同轮并行写同一文件是竞态）。主循环据此把一轮里
+# 的工具分成「只读并发批」+「有副作用串行批」，对照 Claude Code toolOrchestration 的 isConcurrencySafe。
+TOOL_CONCURRENCY_SAFE: dict = {}
 
 # Python 类型注解 → JSON Schema 类型的简单映射。
 _PY_TO_JSON = {str: "string", int: "integer", float: "number", bool: "boolean"}
 
 
-def tool(param_desc: dict | None = None):
+def tool(param_desc: dict | None = None, concurrency_safe: bool = False):
     """把一个普通函数注册成 agent 工具，并自动生成它的 input_schema。
 
     用法：
@@ -42,6 +46,10 @@ def tool(param_desc: dict | None = None):
     - 工具描述 = 函数的 docstring 第一段
     - 参数 = 函数签名里的每个参数（类型来自注解，说明来自 param_desc）
     - 必填参数 = 签名里没有默认值的参数
+
+    concurrency_safe（P1）：本工具是否可与同轮其它工具**并发**执行。默认 False（保守兜底：
+    未显式声明安全的都当不安全、串行执行）。只读工具（read_file）标 True；有副作用的
+    （write_file/run_command）保持 False——同轮并行写同一文件是竞态，必须串行。
     """
     param_desc = param_desc or {}
 
@@ -77,6 +85,7 @@ def tool(param_desc: dict | None = None):
             },
         })
         TOOL_FUNCTIONS[func.__name__] = func
+        TOOL_CONCURRENCY_SAFE[func.__name__] = concurrency_safe
         return func
 
     return decorator
@@ -94,7 +103,7 @@ def tool(param_desc: dict | None = None):
 # （读了就登记进它、调用返回即丢），不跨调用累积、不污染——想让 read+write 共享状态就显式传同一个集合。
 
 
-@tool({"path": "文件路径，可以是相对或绝对路径"})
+@tool({"path": "文件路径，可以是相对或绝对路径"}, concurrency_safe=True)
 def read_file(path: str, _read_files: set | None = None) -> str:
     """读取一个文本文件的完整内容。当你需要查看某个文件写了什么时使用。"""
     # 错误不抛异常，而是返回可读字符串 —— 这样错误会进入模型上下文，
@@ -189,6 +198,16 @@ def write_file(path: str, content: str, _read_files: set | None = None) -> str:
 # ─────────────────────────────────────────────────────────────
 # 2. 分发器 + 小工具
 # ─────────────────────────────────────────────────────────────
+
+def is_concurrency_safe(name: str) -> bool:
+    """工具是否可与同轮其它工具并发执行（P1）。未知工具**保守当不安全**（默认串行）。
+
+    主循环据此把一轮里的工具分批：安全的（只读，如 read_file）并发跑，不安全的
+    （有副作用，如 write_file/run_command/spawn_subagent）按模型给出的原始顺序串行跑——
+    避免同轮并行写同一文件的竞态（TODO P1）。
+    """
+    return TOOL_CONCURRENCY_SAFE.get(name, False)
+
 
 def subagent_tool_schemas() -> list:
     """返回给子 agent 用的**受限工具集**：全集里剔除 spawn_subagent 本身。

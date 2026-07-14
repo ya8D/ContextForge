@@ -578,3 +578,98 @@ def test_loop_rejects_dangerous_command_and_feeds_back(monkeypatch):
     # ③ 危险命令的 tool_use 仍有配对 tool_result（拒绝也要配对，否则下轮 400）
     assert _unpaired_tool_uses(a.messages) == []
 
+
+
+# ── P1：一轮里工具按并发安全分批——只读并发、有副作用串行（消除同轮写竞态）──
+#
+# ★ 有效性设计（吸取评测教训）：不用「同轮写 N 次同一文件、断言最终恒为最后一个」这种判据
+# ——那依赖线程调度巧合，在未修复的基线上也常 pass（是恒真假测试）。改用**确定性的并发探针**：
+# monkeypatch execute_tool 记录「同一时刻有几个 write_file 在执行」，断言峰值并发度=1（串行）。
+# 未修复基线把 write_file 也丢进 8 worker 池，峰值并发度必 >1 → 该测试在基线稳定 fail。
+
+def _drive_one_round(agent, blocks, monkeypatch, probe):
+    """驱动 agent 的真实 _run_loop 跑一轮：第 1 轮请求 blocks 里的工具，第 2 轮 end_turn 收尾。
+    probe 是一个 (name)->None 的记录回调，包在 execute_tool 外层，用来观测并发。"""
+    import unittest.mock as mock
+    import contextforge.agent as agent_mod
+    monkeypatch.setenv("CONTEXTFORGE_TRACE", "off")
+    monkeypatch.setenv("CONTEXTFORGE_LOG", "off")
+    n = {"i": 0}
+
+    def fake_create(**kw):
+        n["i"] += 1
+        if n["i"] == 1:
+            return _FakeResp(blocks, "tool_use")
+        return _FakeResp([_FakeTUBlock("text", text="完成。")], "end_turn")
+
+    real_execute = agent_mod.execute_tool
+
+    def probing_execute(name, tool_input, read_files=None):
+        return probe(name, lambda: real_execute(name, tool_input, read_files=read_files))
+
+    monkeypatch.setattr(agent_mod, "execute_tool", probing_execute)
+    with mock.patch.object(agent.client.messages, "create", side_effect=fake_create):
+        agent.run("一轮多工具")
+
+
+class _ConcurrencyProbe:
+    """记录每个工具「同时在执行的实例数」峰值。用锁+短 sleep 放大并发窗口，让并行真的重叠。"""
+    def __init__(self):
+        import threading
+        self._lock = threading.Lock()
+        self.active = {}      # name -> 当前在跑的实例数
+        self.peak = {}        # name -> 峰值
+
+    def __call__(self, name, run):
+        import time
+        with self._lock:
+            self.active[name] = self.active.get(name, 0) + 1
+            self.peak[name] = max(self.peak.get(name, 0), self.active[name])
+        try:
+            time.sleep(0.02)   # 放大并发窗口：若真并行，多个实例会在这重叠
+            return run()
+        finally:
+            with self._lock:
+                self.active[name] -= 1
+
+
+def test_side_effecting_tools_run_serially_in_one_round(monkeypatch, tmp_path):
+    """P1 核心：同一轮里多个 write_file（有副作用）**串行**执行——峰值并发度必为 1。
+
+    确定性判据（非恒真）：并发探针测 write_file 的峰值同时执行数。修复后串行 → 峰值=1；
+    未修复基线把 write 丢进 8 worker 池 → 峰值>1，故本测试在基线稳定 fail。
+    """
+    a = Agent(max_iterations=3)
+    # 预登记为已读，绕过 write_file 的先读再改约束（本测试只验并发调度）。
+    from contextforge.tools import _norm
+    blocks = []
+    for k in range(4):
+        p = tmp_path / f"f{k}.txt"
+        a.read_files.add(_norm(str(p)))
+        blocks.append(_FakeTUBlock("tool_use", id=f"w{k}", name="write_file",
+                                   input={"path": str(p), "content": str(k)}))
+    probe = _ConcurrencyProbe()
+    _drive_one_round(a, blocks, monkeypatch, probe)
+    assert probe.peak.get("write_file", 0) == 1, (
+        f"write_file 峰值并发度={probe.peak.get('write_file')}（应为 1）—— 有副作用工具没串行，同轮写竞态未消除"
+    )
+    assert _unpaired_tool_uses(a.messages) == []
+
+
+def test_read_only_tools_still_run_in_parallel_in_one_round(monkeypatch, tmp_path):
+    """P1 不回退：同一轮里多个 read_file（只读安全）仍**并发**——峰值并发度 > 1。
+
+    确保修复没把只读也变串行（那会白白拖慢）。read_file 标 concurrency_safe=True，应并发。
+    """
+    a = Agent(max_iterations=3)
+    blocks = []
+    for k in range(4):
+        p = tmp_path / f"r{k}.txt"
+        p.write_text(f"内容{k}", encoding="utf-8")
+        blocks.append(_FakeTUBlock("tool_use", id=f"r{k}", name="read_file",
+                                   input={"path": str(p)}))
+    probe = _ConcurrencyProbe()
+    _drive_one_round(a, blocks, monkeypatch, probe)
+    assert probe.peak.get("read_file", 0) > 1, (
+        f"read_file 峰值并发度={probe.peak.get('read_file')}（应 >1）—— 只读工具被误串行、白白变慢"
+    )

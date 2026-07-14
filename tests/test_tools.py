@@ -177,3 +177,30 @@ def test_execute_tool_unknown_returns_error():
     result = execute_tool("no_such_tool", {})
     assert result.startswith("[错误]")
     assert "未知工具" in result
+
+
+# ── P1：工具并发安全标记 ──
+
+def test_read_file_marked_concurrency_safe():
+    """read_file 是只读工具，标记为并发安全。"""
+    from contextforge.tools import is_concurrency_safe
+    assert is_concurrency_safe("read_file") is True
+
+
+def test_side_effecting_tools_not_concurrency_safe():
+    """write_file / run_command 有副作用，默认不并发安全（同轮串行）。"""
+    from contextforge.tools import is_concurrency_safe
+    assert is_concurrency_safe("write_file") is False
+    assert is_concurrency_safe("run_command") is False
+
+
+def test_unknown_tool_defaults_not_concurrency_safe():
+    """未知工具保守当不安全（默认串行兜底）。"""
+    from contextforge.tools import is_concurrency_safe
+    assert is_concurrency_safe("no_such_tool") is False
+
+
+def test_concurrency_safe_flag_not_in_schema():
+    """concurrency_safe 是执行调度用的元信息，不该出现在给模型的 input_schema 里。"""
+    rf = next(s for s in TOOL_SCHEMAS if s["name"] == "read_file")
+    assert "concurrency_safe" not in rf["input_schema"]["properties"]

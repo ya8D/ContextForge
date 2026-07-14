@@ -19,6 +19,29 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
 
 ---
 
+## P1：并行工具执行分读写——只读并发、有副作用串行（消除同轮写竞态）
+
+对照 Claude Code `toolOrchestration.ts` 的 `isConcurrencySafe` 分批思路，修 TODO P1。用
+work-process skill 走完整八步闭环。
+
+- **定性**：真 bug。主循环一轮里**所有**放行工具无脑并行（`ThreadPoolExecutor(max_workers=8)`，
+  agent.py），不分读写。
+- **真实反例（第3步）**：同轮并行两个 `write_file` 写同一文件 30 次 → `BBBB:23/AAAA:7`，
+  最终内容由线程调度决定、不确定。修复后同一反例 → `BBBB:30`（串行保序、确定）。
+- **修复**：`@tool` 加 `concurrency_safe` 参数（默认 False 保守兜底）+ 注册表 `TOOL_CONCURRENCY_SAFE`
+  + 查询 `is_concurrency_safe()`；`read_file` 标 True，`write_file`/`run_command`/`spawn_subagent`
+  保持 False。主循环把一轮工具分两批——**只读安全批并发**（8 worker 池）、**有副作用批按模型
+  原始顺序串行**。
+- **测试有效性（第6步，吸取评测教训）**：不用「同轮写 N 次断言最终恒为最后一个」这种依赖调度
+  巧合的判据（评测里 baseline 正是这样写出了恒真假测试）；改用**确定性并发探针**——测 write_file
+  的峰值同时执行数，断言=1。`git stash` 验证：基线上峰值并发度=4（8 worker 并行）→ 测试 FAIL；
+  修复后=1 → pass。证明测试非恒真。
+- **测试**：test_tools.py +4（标记正确、不进 schema、未知默认不安全）；test_agent_logic.py +2
+  （有副作用工具串行=峰值并发1、只读工具仍并发>1，均真实驱动 `_run_loop`）。
+- **验证**：`py -m pytest -m "not e2e"` → **116 passed**（原 110 + 6）。
+
+---
+
 ## 严格安全审查：7 条确认缺陷（**真实 API/子进程**复现→修复→固化 e2e 回归）
 
 一次最严格的多 agent 对抗式审查（26 条原始发现→每条派独立 agent 尝试反驳→8 条证伪剔除，

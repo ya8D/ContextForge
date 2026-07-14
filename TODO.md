@@ -11,11 +11,8 @@
 （已确认 myagent 做得对/不吃亏的：验证门做成可插拔 check_command、子 agent 不能再派子 agent、
 token 用真实 usage、路径 abspath 归一化——均与 Claude Code 方向一致，无需改。）
 
-- **P1〔真 bug，先修〕并行工具执行不分读写 → 同轮写同一文件是竞态**
-  - 现状：[agent.py](./src/contextforge/agent.py) 主循环一轮里**所有**工具无脑并行（`max_workers=8`），不管读写。
-  - 实证：同轮并行两个 `write_file` 写同一文件 30 次，最终内容 `BBBB:29 / AAAA:1`——结果由线程调度决定、不确定。
-  - Claude Code 做法（`services/tools/toolOrchestration.ts`）：按工具 `isConcurrencySafe` 分批——**只读并发、写/危险串行**。
-  - 借鉴：给工具加「是否并发安全」标记（read_file 安全，write_file/run_command 不安全），只读并发、其余串行。
+- ~~**P1〔真 bug〕并行工具执行不分读写 → 同轮写同一文件是竞态**~~ ✅ **已完成**（见 PROGRESS.md 顶部）
+  - 修法：`@tool` 加 `concurrency_safe` 标记 + `is_concurrency_safe()`；主循环只读并发、有副作用串行。
 - **P2〔明显限制，先修〕`max_tokens=2048` 对编码 agent 过小**
   - 现状：[agent.py](./src/contextforge/agent.py) 两处硬编码 `max_tokens=2048`——连一个中等文件都写不完（也是之前「max_tokens 截断」隐患的根源参数）。
   - 注意：`max_tokens` 是**单轮输出上限**，与 1M **输入**上下文窗口无关；Opus 4.8 单次输出硬上限约 32K。
