@@ -25,7 +25,14 @@ description: The full closed-loop workflow for completing one TODO.md backlog it
 - **收尾是任务的一部分，不是可选项。** TODO.md 明写：每个待办收尾 = 实现 + 测试跑绿 +
   PROGRESS.md 顶部追加变更日志。少一样都不算做完。
 
-## 八步闭环
+## 前置检查 + 八步闭环
+
+### 0. 开工前置检查（每次开始新任务，最先做）
+先同步 main 并确认上一个 PR 已合并，才开始新任务——否则新分支基于过时 main、还可能漏掉未合并的工作。
+- `git checkout main && git pull --rebase`（把已合并的 PR 拉进本地 main）。
+- 确认**上一个 PR 已合并**：`gh pr view <编号>` 看 `state: MERGED`，或确认 main 含它的 merge commit。
+  **没合并就停下**，先请用户 review/合并，别在旧 main 上开新分支。
+- 确认后，从最新 main 切 `feat/<任务>` 分支：`git checkout -b feat/<任务>`。
 
 ### 1. 读 TODO.md，选定任务，定性
 读 [TODO.md](../../../TODO.md)，找到要做的那一条。先判断它是 **bug** 还是 **改进/增强**——这决定
