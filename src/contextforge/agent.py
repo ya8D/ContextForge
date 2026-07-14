@@ -102,6 +102,33 @@ def _resolve_compact_threshold(explicit: int | None) -> int:
     return COMPACT_THRESHOLD_TOKENS
 
 
+# 单轮输出 token 上限的默认值（P2）。注意：这是**单轮输出**上限，与 1M **输入**上下文窗口无关。
+# 原先硬编码 2048 对编码 agent 过小——连一个中等文件都写不完（write_file 的 content 就发不完整）。
+# 8192 是够写完绝大多数单文件、又不铺张的折中；Opus 4.8 单次输出硬上限约 32K，8192 留足余量。
+# 对照 Claude Code：其辅助调用用 4096，主循环有「不够时升级 max_tokens」的机制；本项目不做动态
+# 升级那套（过重），取一个够用的静态默认 + 可配置即可。
+MAX_TOKENS_DEFAULT = 8192
+
+
+def _resolve_max_tokens(explicit: int | None) -> int:
+    """解析单轮输出 token 上限。优先级：显式传参 > CONTEXTFORGE_MAX_TOKENS > 默认 8192。
+
+    与 _resolve_compact_threshold 同款兜底：环境变量非法（非正整数）时回默认，不报错——
+    配置写错不该让 agent 起不来。写大文件、需要更长单轮输出时可调高（上限受模型约束，约 32K）。
+    """
+    if explicit is not None:
+        return explicit
+    raw = os.environ.get("CONTEXTFORGE_MAX_TOKENS")
+    if raw:
+        try:
+            val = int(raw.strip())
+            if val > 0:
+                return val
+        except ValueError:
+            pass  # 非法值兜底回默认
+    return MAX_TOKENS_DEFAULT
+
+
 def _to_serializable(obj):
     """把 messages 里的内容转成可 JSON 序列化的形式。
 
@@ -151,13 +178,17 @@ class Agent:
                  check_command=_UNSET,
                  tools: list | None = None,
                  compact_directive: str | None = None,
-                 compact_executor: str | None = None):
+                 compact_executor: str | None = None,
+                 max_tokens: int | None = None):
         # 模型 ID 从环境读，不写死（见 CLAUDE.md）。
         self.model = model or os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8[1m]")
         # SDK 自动读取 ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL。
         self.client = anthropic.Anthropic()
         # 硬护栏：循环最多转几轮，防止失控无限循环烧 token（第 1.3 节 护栏）。
         self.max_iterations = max_iterations
+        # 单轮输出 token 上限（P2）。优先级：显式传参 > 环境变量 CONTEXTFORGE_MAX_TOKENS > 默认 8192。
+        # 原先硬编码 2048 过小、大文件一轮写不完；做成可配置，写大文件时可调高（≤ 模型约 32K 上限）。
+        self.max_tokens = _resolve_max_tokens(max_tokens)
         # 上下文压缩阈值（真实 token）。优先级：显式传参 > 环境变量 CONTEXTFORGE_COMPACT_THRESHOLD
         # （写 .env 持久生效，Chromium 这类大项目可调高以用满更多上下文再压）> 默认 500K。
         # 测试可传小值以便低成本触发压缩、验证「压缩链真的通」而不必真塞 500K。
@@ -272,7 +303,7 @@ class Agent:
             # ── Think：调 LLM，让模型决定下一步 ──
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=2048,
+                max_tokens=self.max_tokens,
                 tools=self.tool_schemas,     # 本 agent 可用的工具（主=全集，子=受限子集）
                 messages=self.messages,
             )
@@ -479,7 +510,7 @@ class Agent:
         """
         resp = self.client.messages.create(
             model=self.model,
-            max_tokens=2048,
+            max_tokens=self.max_tokens,
             messages=[{"role": "user", "content": prompt}],
         )
         return "".join(b.text for b in resp.content if b.type == "text")

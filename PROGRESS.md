@@ -19,6 +19,26 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
 
 ---
 
+## P2：max_tokens 从写死 2048 → 可配置默认 8192（单轮输出上限，大文件写得完）
+
+- **定性**：改进类（限制，非 bug）。两处硬编码 `max_tokens=2048`（agent.py 的 Think 主调用 +
+  `_summarize` 压缩摘要）——单轮输出上限过小，编码 agent 连一个中等文件都写不完（write_file 的
+  content 发不完整）。注意这是**单轮输出**上限，与 1M **输入**上下文窗口无关。
+- **基线（改前锚点）**：两处硬编码 2048、不可配置。查 Claude Code 泄露源码佐证：其辅助调用用
+  `max_tokens: 4096`，主循环有「不够时升级 max_tokens」的机制——没有单一低值。故 8192（双倍其
+  辅助值、远低于 Opus 4.8 约 32K 单轮硬上限）是够用又不铺张的静态默认。
+- **实施**：新增 `MAX_TOKENS_DEFAULT=8192` 常量 + `_resolve_max_tokens()`（与
+  `_resolve_compact_threshold` 同款：显式传参 > 环境变量 `CONTEXTFORGE_MAX_TOKENS` > 默认，非法
+  兜底不报错）；`__init__` 加 `max_tokens` 参数存 `self.max_tokens`；两处 `messages.create` 改用
+  `self.max_tokens`。CLAUDE.md 环境变量表补一行。
+- **测试有效性**：5 条纯逻辑测试——4 条验解析优先级（默认/环境/显式/非法兜底），**关键 1 条**
+  `test_max_tokens_actually_used_in_api_call` 用假 client 捕获 `create` 收到的 max_tokens、断言=实例值
+  5000（不是写死的 2048）。这测的是「配置**真正生效**」而非「解析对了」。`git stash` 验证：基线上
+  5 条全 FAIL（常量/参数缺失 + create 传 2048≠5000）；修复后全 pass。
+- **验证**：`py -m pytest -m "not e2e"` → **121 passed**（原 116 + 5）。
+
+---
+
 ## P1 part2：并行分批**保持原始顺序**——修 part1 引入的「同轮先写后读读到旧内容」乱序
 
 **坦白**：part1 的实现（「所有 read 挑出来先并发、所有 write 挑出来后串行」）依赖了一个**不坚实的

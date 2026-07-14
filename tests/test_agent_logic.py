@@ -279,6 +279,61 @@ def test_compact_threshold_1m_80pct_trigger_boundary(monkeypatch):
     assert should_compact(above, threshold=threshold) is True
 
 
+# ── P2：单轮输出上限 max_tokens：显式 > CONTEXTFORGE_MAX_TOKENS > 默认 8192，且真被两处调用点用上 ──
+
+def test_max_tokens_default(monkeypatch):
+    """不传不设环境 → 用默认 8192（原硬编码 2048 过小）。"""
+    from contextforge.agent import MAX_TOKENS_DEFAULT
+    monkeypatch.delenv("CONTEXTFORGE_MAX_TOKENS", raising=False)
+    assert Agent().max_tokens == MAX_TOKENS_DEFAULT == 8192
+
+
+def test_max_tokens_reads_env(monkeypatch):
+    """CONTEXTFORGE_MAX_TOKENS 环境兜底：写大文件需要更长单轮输出时可调高。"""
+    monkeypatch.setenv("CONTEXTFORGE_MAX_TOKENS", "16000")
+    assert Agent().max_tokens == 16000
+
+
+def test_explicit_max_tokens_overrides_env(monkeypatch):
+    """显式传参优先于环境变量。"""
+    monkeypatch.setenv("CONTEXTFORGE_MAX_TOKENS", "16000")
+    assert Agent(max_tokens=4000).max_tokens == 4000
+
+
+def test_max_tokens_invalid_env_falls_back(monkeypatch):
+    """环境变量非法（非正整数）→ 兜底回默认 8192，不报错。"""
+    from contextforge.agent import MAX_TOKENS_DEFAULT
+    for bad in ["abc", "-5", "0", ""]:
+        monkeypatch.setenv("CONTEXTFORGE_MAX_TOKENS", bad)
+        assert Agent().max_tokens == MAX_TOKENS_DEFAULT
+
+
+def test_max_tokens_actually_used_in_api_call(monkeypatch):
+    """关键（非恒真）：Think 主调用真的把 self.max_tokens 传给 messages.create——不是还写死 2048。
+
+    在基线（硬编码 max_tokens=2048）上，无论 self.max_tokens 设成什么，create 收到的都是 2048
+    → 本断言 fail。修复后 create 收到 self.max_tokens（这里设成 5000）→ pass。这测的是「配置真正
+    生效」，不是「配置被解析对了」——后者可能解析对了但调用点没用上。
+    """
+    import unittest.mock as mock
+    monkeypatch.setenv("CONTEXTFORGE_TRACE", "off")
+    monkeypatch.setenv("CONTEXTFORGE_LOG", "off")
+    monkeypatch.delenv("CONTEXTFORGE_MAX_TOKENS", raising=False)
+    a = Agent(max_iterations=2, max_tokens=5000)
+    captured = {}
+
+    def fake_create(**kw):
+        captured["max_tokens"] = kw.get("max_tokens")
+        return _FakeResp([_FakeTUBlock("text", text="done")], "end_turn")
+
+    with mock.patch.object(a.client.messages, "create", side_effect=fake_create):
+        a.run("随便问")
+    assert captured["max_tokens"] == 5000, (
+        f"Think 调用传给 API 的 max_tokens={captured.get('max_tokens')}，不是实例的 5000 —— "
+        f"说明调用点还写死了值（如 2048），配置没真正生效"
+    )
+
+
 # ── 压缩执行者：显式 > CONTEXTFORGE_COMPACT_EXECUTOR > "self"（让子 agent 核实成为可选操作）──
 
 def test_compact_executor_reads_env(monkeypatch):
