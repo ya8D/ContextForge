@@ -1,0 +1,123 @@
+diff --git a/PROGRESS.md b/PROGRESS.md
+index 0c8f0e9..1066c73 100644
+--- a/PROGRESS.md
++++ b/PROGRESS.md
+@@ -19,7 +19,23 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
+ 
+ ---
+ 
+-## 严格安全审查：7 条确认缺陷（**真实 API/子进程**复现→修复→固化 e2e 回归）
++## P3：压缩摘要保留「用户原始指令」逐字不改写
++
++**病**：`context.py` 的 `_SUMMARY_PROMPT` 只保「任务目标/已做/关键结论/下一步」4 维，
++全程允许摘要模型概括改写。用户的原话（[user] 消息）也一并被「顺手润色」，指令语义漂移——
++如「只改 A 不要碰 B」被压成「修改相关文件」，硬约束就丢了。对照 Claude Code
++`services/compact/prompt.ts`（要求所有用户消息逐字保留）。
++
++**修**：给 `_SUMMARY_PROMPT` 补第 5 维——「**所有用户原始指令必须逐字原文保留、不得改写/
++概括/翻译**」，并说明理由（用户原话是任务权威来源）。前四维仍可概括，唯独用户原话照抄。
++`_render_middle_for_summary` 本就给用户消息打 `[user]` 前缀，摘要模型据此即可识别原文。
++
++**验证**：新增 2 条纯逻辑测试（`test_context.py`）——① 钉死 `_SUMMARY_PROMPT` 含「逐字/用户/
++改写」语义；② 端到端确认带用户指令的中段被压时，prompt 里既有「逐字」要求也有用户原话本身。
++两条在 pre-fix 基线（git stash 源码改动）下均失败、fix 后通过；全量 `not e2e` 112 passed。
++
++---
++（**真实 API/子进程**复现→修复→固化 e2e 回归）
+ 
+ 一次最严格的多 agent 对抗式审查（26 条原始发现→每条派独立 agent 尝试反驳→8 条证伪剔除，
+ 18 条确认）。**关键教训（用户驱动）**：初版复现用**假 client**（mock `messages.create`），那只是
+diff --git a/TODO.md b/TODO.md
+index cad0c19..779152d 100644
+--- a/TODO.md
++++ b/TODO.md
+@@ -20,10 +20,8 @@ token 用真实 usage、路径 abspath 归一化——均与 Claude Code 方向
+   - 现状：[agent.py](./src/contextforge/agent.py) 两处硬编码 `max_tokens=2048`——连一个中等文件都写不完（也是之前「max_tokens 截断」隐患的根源参数）。
+   - 注意：`max_tokens` 是**单轮输出上限**，与 1M **输入**上下文窗口无关；Opus 4.8 单次输出硬上限约 32K。
+   - 借鉴：调高到 8192（够写完绝大多数单文件、又不铺张），或做成可配置默认 8192。修前先查 leak 实际值 + 确认模型上限。
+-- **P3〔合理，值得做〕压缩摘要保留「用户原始指令」逐字不改写**
+-  - 现状：[context.py](./src/contextforge/context.py) 摘要 prompt 保「任务目标/已做/关键结论/下一步」4 维。
+-  - Claude Code 做法（`services/compact/prompt.ts`）：9 维，特别要求「**所有用户消息**逐字保留」「最近任务逐字引用防漂移」。
+-  - 借鉴：4 维补一条「保留所有用户原始指令原文」——用户的原话最不该被摘要模型改写。
++- **P3〔已完成，见 PROGRESS.md〕压缩摘要保留「用户原始指令」逐字不改写** —— 已做：
++  [context.py](./src/contextforge/context.py) `_SUMMARY_PROMPT` 补第 5 维「所有用户原始指令逐字原文保留、不得改写/概括」。
+ - **P4〔存疑，待考证〕micro-compaction（只清旧工具结果，不摘要）**
+   - Claude Code 有轻量局部压缩：不调 LLM，只把旧的大工具结果替换成 `[Old tool result content cleared]`、保留最近 N 个。
+   - 存疑：对 myagent 是否明确更好尚无硬证据（Claude Code 该逻辑部分在 feature flag 后，外部构建可能不启用）。需更多证据再决定是否做。
+diff --git a/src/contextforge/context.py b/src/contextforge/context.py
+index 407a331..810e981 100644
+--- a/src/contextforge/context.py
++++ b/src/contextforge/context.py
+@@ -121,13 +121,20 @@ def _render_middle_for_summary(middle_messages: list[dict]) -> str:
+ 
+ 
+ # 摘要提示词：告诉摘要模型该总结哪些维度（保留任务推进所需的关键信息）。
++#
++# P3（对照 Claude Code services/compact/prompt.ts）：第 5 维「用户原始指令逐字保留」
++# 是**特殊维度**——前四维允许摘要模型概括改写，唯独用户的原话最不该被改写：
++# 它是任务的权威来源，一旦被摘要模型「顺手润色」，指令语义就漂移了（比如用户明说
++# 「只改 A 不要碰 B」被压成「修改相关文件」，约束就丢了）。故显式要求逐字照抄原文。
+ _SUMMARY_PROMPT = (
+     "下面是一个 AI agent 执行任务过程中的一段中间对话历史。请把它压缩成一段"
+     "结构化的「前情摘要」，供 agent 继续往下做时参考。必须保留：\n"
+     "1. 任务目标是什么；\n"
+     "2. 已经做了哪些关键步骤（调了什么工具、改了什么文件）；\n"
+     "3. 发现了哪些关键结论 / 事实 / 数据；\n"
+-    "4. 还没做完、下一步要往哪走。\n"
++    "4. 还没做完、下一步要往哪走；\n"
++    "5. **所有用户原始指令（[user] 说的话）必须逐字原文保留、不得改写/概括/翻译**——"
++    "用户的原话是任务的权威来源，一旦被你润色语义就漂移了。把它们原样引用在摘要里。\n"
+     "只输出摘要正文，不要客套。以下是历史：\n\n"
+ )
+ 
+diff --git a/tests/test_context.py b/tests/test_context.py
+index 1003662..2fa54fc 100644
+--- a/tests/test_context.py
++++ b/tests/test_context.py
+@@ -167,6 +167,46 @@ def test_summarizer_receives_middle_content():
+     assert "f0.txt" in captured["prompt"] or "文件0" in captured["prompt"]
+ 
+ 
++# ── P3：用户原始指令逐字保留（第 5 维）──
++
++def test_summary_prompt_requires_verbatim_user_instructions():
++    """P3：默认摘要 prompt 必须显式要求「用户原始指令逐字保留、不得改写」。
++
++    这是 P3 的核心契约：前四维可概括，唯独用户原话不许被摘要模型润色。
++    钉死这条，防止日后有人删掉第 5 维导致指令语义漂移回归。
++    """
++    from contextforge.context import _SUMMARY_PROMPT
++
++    # 逐字保留的语义要求在场
++    assert "逐字" in _SUMMARY_PROMPT
++    assert "用户" in _SUMMARY_PROMPT
++    # 明确禁止改写/概括
++    assert "改写" in _SUMMARY_PROMPT or "概括" in _SUMMARY_PROMPT
++
++
++def test_verbatim_requirement_reaches_summarizer_with_user_text():
++    """P3 端到端（纯逻辑）：真实带用户指令的中段被压时，
++    喂给 summarizer 的 prompt 里既有「逐字保留」要求、也有用户原话本身。
++    """
++    captured = {}
++
++    def capturing(prompt: str) -> str:
++        captured["prompt"] = prompt
++        return "摘要"
++
++    # 头 + 一条夹在中段的用户指令 + 足够多的轮撑出可压中段
++    msgs: list[dict] = [{"role": "user", "content": "原始任务：分析这些文件"}]
++    msgs.append({"role": "user", "content": "只改 config.py，绝对不要碰 main.py"})
++    for i in range(5):
++        msgs.extend(_make_turn(i))
++
++    compact_messages(msgs, capturing, keep_recent_turns=3)
++    # 逐字保留要求进了 prompt
++    assert "逐字" in captured["prompt"]
++    # 用户中段原话也进了 prompt（渲染没丢），摘要模型才有原文可照抄
++    assert "绝对不要碰 main.py" in captured["prompt"]
++
++
+ # ── T5-A：directive 客制化压缩偏好（向后兼容 + 叠加注入）──
+ 
+ def test_directive_none_prompt_identical_to_p3():

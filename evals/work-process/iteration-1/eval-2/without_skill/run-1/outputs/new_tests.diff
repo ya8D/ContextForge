@@ -1,0 +1,51 @@
+diff --git a/tests/test_context.py b/tests/test_context.py
+index 1003662..2fa54fc 100644
+--- a/tests/test_context.py
++++ b/tests/test_context.py
+@@ -167,6 +167,46 @@ def test_summarizer_receives_middle_content():
+     assert "f0.txt" in captured["prompt"] or "文件0" in captured["prompt"]
+ 
+ 
++# ── P3：用户原始指令逐字保留（第 5 维）──
++
++def test_summary_prompt_requires_verbatim_user_instructions():
++    """P3：默认摘要 prompt 必须显式要求「用户原始指令逐字保留、不得改写」。
++
++    这是 P3 的核心契约：前四维可概括，唯独用户原话不许被摘要模型润色。
++    钉死这条，防止日后有人删掉第 5 维导致指令语义漂移回归。
++    """
++    from contextforge.context import _SUMMARY_PROMPT
++
++    # 逐字保留的语义要求在场
++    assert "逐字" in _SUMMARY_PROMPT
++    assert "用户" in _SUMMARY_PROMPT
++    # 明确禁止改写/概括
++    assert "改写" in _SUMMARY_PROMPT or "概括" in _SUMMARY_PROMPT
++
++
++def test_verbatim_requirement_reaches_summarizer_with_user_text():
++    """P3 端到端（纯逻辑）：真实带用户指令的中段被压时，
++    喂给 summarizer 的 prompt 里既有「逐字保留」要求、也有用户原话本身。
++    """
++    captured = {}
++
++    def capturing(prompt: str) -> str:
++        captured["prompt"] = prompt
++        return "摘要"
++
++    # 头 + 一条夹在中段的用户指令 + 足够多的轮撑出可压中段
++    msgs: list[dict] = [{"role": "user", "content": "原始任务：分析这些文件"}]
++    msgs.append({"role": "user", "content": "只改 config.py，绝对不要碰 main.py"})
++    for i in range(5):
++        msgs.extend(_make_turn(i))
++
++    compact_messages(msgs, capturing, keep_recent_turns=3)
++    # 逐字保留要求进了 prompt
++    assert "逐字" in captured["prompt"]
++    # 用户中段原话也进了 prompt（渲染没丢），摘要模型才有原文可照抄
++    assert "绝对不要碰 main.py" in captured["prompt"]
++
++
+ # ── T5-A：directive 客制化压缩偏好（向后兼容 + 叠加注入）──
+ 
+ def test_directive_none_prompt_identical_to_p3():

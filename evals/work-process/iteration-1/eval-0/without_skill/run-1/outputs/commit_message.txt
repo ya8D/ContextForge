@@ -1,0 +1,10 @@
+fix: P1 并行工具区分读写——只读并发、写/跑命令串行，消除同轮写竞态
+
+原主循环一轮里所有工具无脑并行（max_workers=8），同轮并行 write_file 写同一
+文件结果由线程调度决定、不确定。对照 Claude Code toolOrchestration.ts 的
+isConcurrencySafe 分批：@tool 加 concurrency_safe 标记（默认 False 保守兜底，
+read_file=True）+ is_concurrency_safe 查询；agent Act 阶段安全批并发、不安全
+批按原始顺序串行。加 6 条测试（标记正确 + 不进 schema + 整循环驱动验串行保序）。
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+

@@ -1,0 +1,13 @@
+feat: P2 max_tokens 从写死 2048 → 可配置默认 8192
+
+两处硬编码 max_tokens=2048（Think 主调用 + _summarize 压缩摘要）对编码
+agent 过小，单轮连中等文件都写不完。新增 MAX_TOKENS_DEFAULT=8192 +
+_resolve_max_tokens（显式传参 > CONTEXTFORGE_MAX_TOKENS > 默认，非法值兜底），
+Agent 加 max_tokens 参数，两处调用点改用 self.max_tokens。
+
+新增 5 条纯逻辑回归（默认/环境/显式/非法兜底/两处调用点实际取值），
+已确认在旧 2048 基线上真的红；py -m pytest -m "not e2e" 115 passed。
+同步更新 CLAUDE.md 环境变量表、TODO.md 标记完成、PROGRESS.md 追加日志。
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+

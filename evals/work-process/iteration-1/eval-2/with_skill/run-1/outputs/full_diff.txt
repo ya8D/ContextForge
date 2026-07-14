@@ -1,0 +1,111 @@
+diff --git a/PROGRESS.md b/PROGRESS.md
+index 0c8f0e9..0935025 100644
+--- a/PROGRESS.md
++++ b/PROGRESS.md
+@@ -19,7 +19,24 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
+ 
+ ---
+ 
+-## 严格安全审查：7 条确认缺陷（**真实 API/子进程**复现→修复→固化 e2e 回归）
++## P3：压缩摘要新增第 5 维——用户原始指令逐字保留、禁止改写
++
++**改什么 & 为什么**：`context.py` 的被动压缩摘要 prompt（`_SUMMARY_PROMPT`）原本只有四维
++（任务目标/已做/发现/下一步），全是「让模型总结」——而总结天然允许改写措辞。用户的**原话**是
++任务的权威来源，一旦被摘要模型换词/归纳/丢细节，真实意图会悄悄漂移，之后每一轮都在错误的指令上
++推进。对照 Claude Code `services/compact/prompt.ts`「所有用户消息逐字保留、最近任务逐字引用防漂移」，
++补第 5 维：**所有 [user] 原始指令必须逐字原文保留、不得改写或概括**——这是 5 维里唯一禁止改写的一条。
++叠加而非替换，原四维一条不丢。
++
++**怎么验证的**：改进类任务，先立基线——改前 `_SUMMARY_PROMPT` 不含「用户原始指令/逐字/原文/改写」
++任一语义词。新增 3 条纯逻辑测试（`test_context.py`）：①prompt 含逐字保留硬要求 ②原四维仍在（防替换）
++③该要求随真实压缩路径传到 summarizer。按 skill 第 6 步做基线验证：`git stash` 掉 context.py 修改后，
++①③在基线 fail（②作反向守卫、基线本就 pass），`git stash pop` 恢复后全 pass。
++
++**测试结果**：`py -m pytest -m "not e2e"` 全绿 **113 passed**（新增 3 条含在内）。纯 prompt 字符串改动，
++不碰会真调 API 的路径，无需单跑 e2e。
++
++（**真实 API/子进程**复现→修复→固化 e2e 回归）
+ 
+ 一次最严格的多 agent 对抗式审查（26 条原始发现→每条派独立 agent 尝试反驳→8 条证伪剔除，
+ 18 条确认）。**关键教训（用户驱动）**：初版复现用**假 client**（mock `messages.create`），那只是
+diff --git a/src/contextforge/context.py b/src/contextforge/context.py
+index 407a331..8d730b9 100644
+--- a/src/contextforge/context.py
++++ b/src/contextforge/context.py
+@@ -121,13 +121,21 @@ def _render_middle_for_summary(middle_messages: list[dict]) -> str:
+ 
+ 
+ # 摘要提示词：告诉摘要模型该总结哪些维度（保留任务推进所需的关键信息）。
++# P3：新增第 5 维——**用户原始指令逐字保留、绝不改写**。对照 Claude Code
++# services/compact/prompt.ts「所有用户消息逐字保留、最近任务逐字引用防漂移」。
++# 为什么单拎出来当硬要求：其余四维（目标/已做/发现/下一步）是让模型「总结」，
++# 总结天然允许改写措辞；但用户的原话是任务的权威来源，一旦被摘要模型改写（换词、
++# 归纳、丢细节）就可能悄悄漂移真实意图，后续每一轮都在错误的指令上推进。故它不走
++# 「总结」而走「逐字复制」——这是这 5 维里唯一禁止改写的一条。
+ _SUMMARY_PROMPT = (
+     "下面是一个 AI agent 执行任务过程中的一段中间对话历史。请把它压缩成一段"
+     "结构化的「前情摘要」，供 agent 继续往下做时参考。必须保留：\n"
+     "1. 任务目标是什么；\n"
+     "2. 已经做了哪些关键步骤（调了什么工具、改了什么文件）；\n"
+     "3. 发现了哪些关键结论 / 事实 / 数据；\n"
+-    "4. 还没做完、下一步要往哪走。\n"
++    "4. 还没做完、下一步要往哪走；\n"
++    "5. **所有用户原始指令（[user] 说的话）必须逐字原文保留，一字不改、不得改写"
++    "或概括**——用户的原话是任务的权威来源，被摘要模型改写会导致意图漂移。\n"
+     "只输出摘要正文，不要客套。以下是历史：\n\n"
+ )
+ 
+diff --git a/tests/test_context.py b/tests/test_context.py
+index 1003662..029cbb4 100644
+--- a/tests/test_context.py
++++ b/tests/test_context.py
+@@ -167,6 +167,49 @@ def test_summarizer_receives_middle_content():
+     assert "f0.txt" in captured["prompt"] or "文件0" in captured["prompt"]
+ 
+ 
++# ── P3：摘要 prompt 要求「用户原始指令逐字保留」──
++
++def test_summary_prompt_requires_verbatim_user_instructions():
++    """P3：_SUMMARY_PROMPT 必须含「用户原始指令逐字保留、不得改写」这条硬要求。
++
++    基线（改前只有四维、无此维）上此断言会 fail——这是防「摘要模型改写用户原话
++    导致意图漂移」的核心保障。用关键语义词而非整句匹配，避免措辞微调即误红。
++    """
++    from contextforge.context import _SUMMARY_PROMPT
++
++    # 必须点名「用户原始指令」这个对象
++    assert "用户原始指令" in _SUMMARY_PROMPT
++    # 必须要求「逐字 / 原文」保留（区别于其余四维的「总结」）
++    assert "逐字" in _SUMMARY_PROMPT
++    assert "原文" in _SUMMARY_PROMPT
++    # 必须明确禁止改写（不只是「保留」，而是「不得改写」）
++    assert "改写" in _SUMMARY_PROMPT
++
++
++def test_summary_prompt_still_has_four_base_dimensions():
++    """P3 是叠加不是替换：原四维（目标/已做/发现/下一步）一条都不能丢。"""
++    from contextforge.context import _SUMMARY_PROMPT
++
++    assert "任务目标是什么" in _SUMMARY_PROMPT
++    assert "已经做了哪些关键步骤" in _SUMMARY_PROMPT
++    assert "发现了哪些关键结论" in _SUMMARY_PROMPT
++    assert "下一步要往哪走" in _SUMMARY_PROMPT
++
++
++def test_verbatim_requirement_reaches_summarizer_prompt():
++    """真实压缩路径：新的逐字要求确实随 prompt 传到了 summarizer（没被拼装漏掉）。"""
++    captured = {}
++
++    def capturing(prompt: str) -> str:
++        captured["prompt"] = prompt
++        return "摘要"
++
++    msgs = _build_history(5)
++    compact_messages(msgs, capturing, keep_recent_turns=3)
++    assert "用户原始指令" in captured["prompt"]
++    assert "逐字" in captured["prompt"]
++
++
+ # ── T5-A：directive 客制化压缩偏好（向后兼容 + 叠加注入）──
+ 
+ def test_directive_none_prompt_identical_to_p3():

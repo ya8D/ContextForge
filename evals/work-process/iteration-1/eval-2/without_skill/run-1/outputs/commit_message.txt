@@ -1,0 +1,8 @@
+feat: P3 压缩摘要逐字保留用户原始指令，防指令语义漂移
+
+_SUMMARY_PROMPT 补第 5 维：所有用户原始指令逐字原文保留、不得改写/概括。
+前四维仍可概括，唯独用户原话照抄（对照 Claude Code services/compact/prompt.ts）。
+新增 2 条纯逻辑测试钉死该契约，pre-fix 基线下失败、fix 后通过；全量 not e2e 112 passed。
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+

@@ -1,0 +1,12 @@
+feat: P2 max_tokens 2048→8192 且做成可配置（编码 agent 单轮写得完中等文件）
+
+两处硬编码 max_tokens=2048 对能 write_file 的编码 agent 过小——单轮连中等文件都
+写不完。改成 MAX_TOKENS_DEFAULT=8192，并加 _resolve_max_tokens：显式传参 >
+CONTEXTFORGE_MAX_TOKENS 环境变量 > 默认，非法值兜底，与 compact_threshold 同款。
+Agent.__init__ 加 max_tokens 参数，Think 调用与压缩摘要调用均改用 self.max_tokens。
+
+验证：新增 4 条纯逻辑测试（默认/环境/显式覆盖/非法兜底），git stash 核验基线全 fail、
+修复后全 pass（非恒真）；全量回归 py -m pytest -m "not e2e" 114 passed。
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+

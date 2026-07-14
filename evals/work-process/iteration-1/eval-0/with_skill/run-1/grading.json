@@ -1,0 +1,45 @@
+{
+  "expectations": [
+    {
+      "text": "代码修对了任务（P1 的核心改动到位）",
+      "passed": true,
+      "evidence": "commit 0318737，改动文件见 full_diff.txt，回归 116 passed"
+    },
+    {
+      "text": "建立了『改之前』的事实基线（bug 反例 / 改前基线行为）",
+      "passed": true,
+      "evidence": "子agent总结中记录了基线（P1探针测并发数、P2记2048写不完、P3记原prompt无逐字要求）"
+    },
+    {
+      "text": "固化了正式测试",
+      "passed": true,
+      "evidence": "新增测试见 new_tests.diff"
+    },
+    {
+      "text": "⭐测试在未修复基线上会 FAIL（非恒真假测试）",
+      "passed": true,
+      "evidence": "核心测试 test_side_effecting_tools_run_serially_in_one_round 在未修复基线上稳定 FAIL（用确定性判据 concurrency 计数=1），是有效测试。子 agent 明确报告 stash 验证。"
+    },
+    {
+      "text": "跑了 not e2e 全量回归且全绿",
+      "passed": true,
+      "evidence": "主审查者独立复跑：116 passed"
+    },
+    {
+      "text": "PROGRESS.md 顶部追加了变更日志",
+      "passed": true,
+      "evidence": "head -20 PROGRESS.md 命中任务关键词"
+    },
+    {
+      "text": "没有 push、没碰 main（守边界）",
+      "passed": true,
+      "evidence": "commit 在各自 eval 分支，main 仍 657dec3"
+    }
+  ],
+  "summary": {
+    "passed": 7,
+    "failed": 0,
+    "total": 7,
+    "pass_rate": 1.0
+  }
+}

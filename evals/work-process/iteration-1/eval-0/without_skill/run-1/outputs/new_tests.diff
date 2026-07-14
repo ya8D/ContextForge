@@ -1,0 +1,129 @@
+diff --git a/tests/test_agent_logic.py b/tests/test_agent_logic.py
+index e0ba4e4..34483ca 100644
+--- a/tests/test_agent_logic.py
++++ b/tests/test_agent_logic.py
+@@ -578,3 +578,83 @@ def test_loop_rejects_dangerous_command_and_feeds_back(monkeypatch):
+     # ③ 危险命令的 tool_use 仍有配对 tool_result（拒绝也要配对，否则下轮 400）
+     assert _unpaired_tool_uses(a.messages) == []
+ 
++
++# ── P1：同轮工具按并发安全分批（只读并发、写/跑命令串行，消除同轮写竞态）──
++
++def test_same_round_writes_execute_serially_and_deterministically(monkeypatch, tmp_path):
++    """P1 核心回归：同一轮里多个 write_file 写同一文件，必须**串行**执行、结果确定。
++
++    原 bug：一轮里所有工具无脑并行（max_workers=8）。同轮并行 N 个 write_file 写同一文件，
++    最终内容由线程调度决定、不确定（实证 BBBB:29/AAAA:1 之类）。修法：不安全工具串行、
++    按模型给出的原始顺序逐个执行。本测试让假模型一轮请求 8 个 write_file 依次写
++    "0".."7" 到同一文件，断言最终内容恒为最后一个写的 "7"——串行 + 保序才做得到。
++    并行下这个断言会偶发红（末尾未必是 7）。
++    """
++    import unittest.mock as mock
++    monkeypatch.setenv("CONTEXTFORGE_TRACE", "off")
++    monkeypatch.setenv("CONTEXTFORGE_LOG", "off")
++    target = tmp_path / "race.txt"
++    a = Agent(max_iterations=4)
++    # 先把文件标记为「已读」，绕过 write_file 的先读再改约束（本测试只验并发调度，非该约束）。
++    from contextforge.tools import _norm
++    a.read_files.add(_norm(str(target)))
++    n = {"i": 0}
++
++    def fake_create(**kw):
++        n["i"] += 1
++        if n["i"] == 1:
++            # 一轮请求 8 个 write_file，顺序写 "0".."7" 到同一文件
++            blocks = [
++                _FakeTUBlock("tool_use", id=f"w{k}", name="write_file",
++                             input={"path": str(target), "content": str(k)})
++                for k in range(8)
++            ]
++            return _FakeResp(blocks, "tool_use")
++        return _FakeResp([_FakeTUBlock("text", text="写完了。")], "end_turn")
++
++    with mock.patch.object(a.client.messages, "create", side_effect=fake_create):
++        a.run("同轮多次写同一文件")
++
++    # 串行 + 保序执行 → 最后写入的一定是 "7"；并行则不确定
++    assert target.read_text(encoding="utf-8") == "7"
++    # 8 个 write_file 都各有配对 tool_result（不漏执行、历史不留未配对块）
++    assert _unpaired_tool_uses(a.messages) == []
++
++
++def test_same_round_reads_run_in_parallel(monkeypatch, tmp_path):
++    """P1：同轮多个只读 read_file 仍走并行批（保留原有并发收益，只是不再无脑并行写）。
++
++    通过打桩 ThreadPoolExecutor.map 记录它是否被调用来验证：只读批确实进了并行路径。
++    """
++    import unittest.mock as mock
++    import contextforge.agent as agent_mod
++    monkeypatch.setenv("CONTEXTFORGE_TRACE", "off")
++    monkeypatch.setenv("CONTEXTFORGE_LOG", "off")
++    f1 = tmp_path / "a.txt"; f1.write_text("A", encoding="utf-8")
++    f2 = tmp_path / "b.txt"; f2.write_text("B", encoding="utf-8")
++    a = Agent(max_iterations=4)
++    n = {"i": 0}
++
++    def fake_create(**kw):
++        n["i"] += 1
++        if n["i"] == 1:
++            return _FakeResp([
++                _FakeTUBlock("tool_use", id="r1", name="read_file", input={"path": str(f1)}),
++                _FakeTUBlock("tool_use", id="r2", name="read_file", input={"path": str(f2)}),
++            ], "tool_use")
++        return _FakeResp([_FakeTUBlock("text", text="读完了。")], "end_turn")
++
++    pool_used = {"map_called": False}
++    real_map = agent_mod.ThreadPoolExecutor.map
++
++    def spy_map(self, fn, iterable):
++        pool_used["map_called"] = True
++        return real_map(self, fn, iterable)
++
++    with mock.patch.object(agent_mod.ThreadPoolExecutor, "map", spy_map), \
++         mock.patch.object(a.client.messages, "create", side_effect=fake_create):
++        a.run("同轮读两个文件")
++
++    assert pool_used["map_called"], "只读批没走并行路径 —— 并发收益丢了"
++    assert _unpaired_tool_uses(a.messages) == []
++
+diff --git a/tests/test_tools.py b/tests/test_tools.py
+index 365e46e..63ec770 100644
+--- a/tests/test_tools.py
++++ b/tests/test_tools.py
+@@ -13,6 +13,7 @@ from contextforge import tools
+ from contextforge.tools import (
+     TOOL_SCHEMAS,
+     execute_tool,
++    is_concurrency_safe,
+     read_file,
+     run_command,
+     subagent_tool_schemas,
+@@ -177,3 +178,28 @@ def test_execute_tool_unknown_returns_error():
+     result = execute_tool("no_such_tool", {})
+     assert result.startswith("[错误]")
+     assert "未知工具" in result
++
++
++# ── P1：工具并发安全标记（只读并发、写/跑命令串行）────────────────
++
++def test_read_file_is_concurrency_safe():
++    """read_file 只读无副作用 → 并发安全，可与别的工具并行。"""
++    assert is_concurrency_safe("read_file") is True
++
++
++def test_write_and_run_command_not_concurrency_safe():
++    """write_file / run_command 有副作用 → 不并发安全（同轮并行写同一文件会竞态）。"""
++    assert is_concurrency_safe("write_file") is False
++    assert is_concurrency_safe("run_command") is False
++
++
++def test_unknown_tool_defaults_not_concurrency_safe():
++    """未登记的工具默认不安全——保守串行，绝不因遗漏标记引入竞态。"""
++    assert is_concurrency_safe("no_such_tool_xyz") is False
++
++
++def test_concurrency_safe_flag_not_in_schema():
++    """并发安全标记是调度用的带外信息，不该出现在给模型的 input_schema 里。"""
++    rf = next(s for s in TOOL_SCHEMAS if s["name"] == "read_file")
++    assert "concurrency_safe" not in rf["input_schema"]["properties"]
++    assert "concurrency_safe" not in rf  # 也不在 schema 顶层

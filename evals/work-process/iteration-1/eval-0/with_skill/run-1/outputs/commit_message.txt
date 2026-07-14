@@ -1,0 +1,13 @@
+fix: P1 并行工具执行分读写——只读并发、有副作用串行，消除同轮写同一文件竞态
+
+主循环原本对一轮所有 tool_use 无脑并行（max_workers=8），不分读写。同轮并行两个
+write_file 写同一文件时最终内容由线程调度决定、不确定——真竞态。对照 Claude Code
+toolOrchestration.ts 的 isConcurrencySafe 分批：给 @tool 加 concurrency_safe 标记
+（read_file 安全；write_file/run_command/spawn_subagent 默认不安全），执行段分两批——
+只读并发（保留多文件同读加速）、有副作用串行（按请求顺序逐个跑）。
+
+固化 6 个纯逻辑测试（3 标记 + 3 行为）；探针测最大并发数：基线 write 观测 max=8 → 修复后 =1，
+read_file 仍 >1。基线上串行两条断言 assert 8==1 fail（证明非恒真）。全量 116 passed。
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+

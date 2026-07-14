@@ -1,0 +1,186 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index bf5d2d0..3d08b84 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -57,6 +57,13 @@
+ 
+ > CLI 里还有 `/compact [要求]` 命令做**主动压缩**（当场输入的要求即本次压缩偏好），见运行方式。
+ 
++## 单轮输出上限（P2）
++
++| 变量 | 取值 | 默认 | 作用 |
++|---|---|---|---|
++| `CONTEXTFORGE_MAX_TOKENS` | 正整数（token） | `8192` | 每次 LLM 回复的**单轮输出上限**（`max_tokens`），与 1M **输入**上下文窗口无关。旧值 2048 对编码 agent 过小（一个中等文件一轮写不完）。Opus 4.8 单次输出硬上限约 32K，勿超。非法值兜底回默认。显式构造参数 `Agent(max_tokens=...)` 优先级更高。 |
++
++
+ 
+ ## 运行方式
+ 
+diff --git a/PROGRESS.md b/PROGRESS.md
+index 0c8f0e9..39f0671 100644
+--- a/PROGRESS.md
++++ b/PROGRESS.md
+@@ -19,6 +19,28 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
+ 
+ ---
+ 
++## P2：`max_tokens` 可配置、默认 2048 → 8192（编码 agent 单轮写得完中等文件）
++
++**背景（基线）**：`agent.py` 两处硬编码 `max_tokens=2048`——Think 主调用与压缩摘要调用。
++`max_tokens` 是**单轮输出上限**，与 1M **输入**上下文窗口无关。对一个能 `write_file` 的编码
++agent，单轮 2048 token 连一个中等文件都写不完（也是之前「max_tokens 截断」隐患条目的根源参数）。
++
++**改动**：
++- 新增模块常量 `MAX_TOKENS_DEFAULT = 8192`（够写完绝大多数单文件、又不铺张；Opus 4.8 单次输出
++  硬上限约 32K，8192 远在其内）。
++- 新增解析器 `_resolve_max_tokens(explicit)`，优先级 **显式传参 > 环境变量 `CONTEXTFORGE_MAX_TOKENS`
++  > 默认 8192**；环境变量非法（非正整数）兜底回默认、不报错。与 `_resolve_compact_threshold` 同款。
++- `Agent.__init__` 加 `max_tokens: int | None = None` 参数，存 `self.max_tokens`；两处
++  `messages.create(max_tokens=...)` 均改用 `self.max_tokens`。
++
++**验证**：新增 4 条纯逻辑测试（`tests/test_agent_logic.py`）：默认 8192、读环境变量、显式覆盖环境、
++非法环境兜底。基线核验——`git stash` 暂存源码修复后，4 条全 fail（`ImportError`/`AttributeError`/
++`TypeError`，证明确实测的是本次改动），`pop` 恢复后全 pass（非恒真）。全量回归
++`py -m pytest -m "not e2e"` **114 passed**。（未跑 e2e：改动只调高单轮上限、不改调用契约，无真实
++API 行为分叉需验证。）
++
++---
++
+ ## 严格安全审查：7 条确认缺陷（**真实 API/子进程**复现→修复→固化 e2e 回归）
+ 
+ 一次最严格的多 agent 对抗式审查（26 条原始发现→每条派独立 agent 尝试反驳→8 条证伪剔除，
+diff --git a/TODO.md b/TODO.md
+index cad0c19..625988b 100644
+--- a/TODO.md
++++ b/TODO.md
+@@ -16,10 +16,6 @@ token 用真实 usage、路径 abspath 归一化——均与 Claude Code 方向
+   - 实证：同轮并行两个 `write_file` 写同一文件 30 次，最终内容 `BBBB:29 / AAAA:1`——结果由线程调度决定、不确定。
+   - Claude Code 做法（`services/tools/toolOrchestration.ts`）：按工具 `isConcurrencySafe` 分批——**只读并发、写/危险串行**。
+   - 借鉴：给工具加「是否并发安全」标记（read_file 安全，write_file/run_command 不安全），只读并发、其余串行。
+-- **P2〔明显限制，先修〕`max_tokens=2048` 对编码 agent 过小**
+-  - 现状：[agent.py](./src/contextforge/agent.py) 两处硬编码 `max_tokens=2048`——连一个中等文件都写不完（也是之前「max_tokens 截断」隐患的根源参数）。
+-  - 注意：`max_tokens` 是**单轮输出上限**，与 1M **输入**上下文窗口无关；Opus 4.8 单次输出硬上限约 32K。
+-  - 借鉴：调高到 8192（够写完绝大多数单文件、又不铺张），或做成可配置默认 8192。修前先查 leak 实际值 + 确认模型上限。
+ - **P3〔合理，值得做〕压缩摘要保留「用户原始指令」逐字不改写**
+   - 现状：[context.py](./src/contextforge/context.py) 摘要 prompt 保「任务目标/已做/关键结论/下一步」4 维。
+   - Claude Code 做法（`services/compact/prompt.ts`）：9 维，特别要求「**所有用户消息**逐字保留」「最近任务逐字引用防漂移」。
+diff --git a/src/contextforge/agent.py b/src/contextforge/agent.py
+index 8a21a6a..7fe0b04 100644
+--- a/src/contextforge/agent.py
++++ b/src/contextforge/agent.py
+@@ -52,6 +52,12 @@ _TRACES_ROOT = _HERE / "traces"
+ # 真正的多轮累积膨胀交给 context.py 的压缩层处理，两层各管各的）。
+ _MAX_RESULT_CHARS = 50000
+ 
++# 单轮输出 token 上限（max_tokens）。这是**单次回复**的产出上限，与 1M **输入**上下文窗口无关。
++# 旧值 2048 对一个能 write_file 的编码 agent 过小——连一个中等文件一轮都写不完（P2）。
++# 调到 8192：够写完绝大多数单文件、又不铺张。Opus 4.8 单次输出硬上限约 32K，8192 远在其内。
++# 可用 CONTEXTFORGE_MAX_TOKENS（写 .env 持久生效）或显式构造参数覆盖，与 compact_threshold 同款。
++MAX_TOKENS_DEFAULT = 8192
++
+ 
+ # ── 轻量 trace 工具：让 TAOR 每一步透明可见（对照第 18.5 节 可观测性）──
+ # 用带颜色/图标的前缀区分阶段，肉眼一眼就能跟上循环在做什么。
+@@ -96,6 +102,25 @@ def _resolve_compact_threshold(explicit: int | None) -> int:
+     return COMPACT_THRESHOLD_TOKENS
+ 
+ 
++def _resolve_max_tokens(explicit: int | None) -> int:
++    """解析单轮输出上限 max_tokens。优先级：显式传参 > CONTEXTFORGE_MAX_TOKENS > 默认 8192。
++
++    环境变量非法（非正整数）时兜底回默认，不报错——配置写错不该让 agent 起不来
++    （与 _resolve_compact_threshold 同款兜底思路）。
++    """
++    if explicit is not None:
++        return explicit
++    raw = os.environ.get("CONTEXTFORGE_MAX_TOKENS")
++    if raw:
++        try:
++            val = int(raw.strip())
++            if val > 0:
++                return val
++        except ValueError:
++            pass  # 非法值兜底回默认
++    return MAX_TOKENS_DEFAULT
++
++
+ def _to_serializable(obj):
+     """把 messages 里的内容转成可 JSON 序列化的形式。
+ 
+@@ -142,6 +167,7 @@ class Agent:
+ 
+     def __init__(self, model: str | None = None, max_iterations: int = 100,
+                  compact_threshold: int | None = None,
++                 max_tokens: int | None = None,
+                  check_command=_UNSET,
+                  tools: list | None = None,
+                  compact_directive: str | None = None,
+@@ -156,6 +182,9 @@ class Agent:
+         # （写 .env 持久生效，Chromium 这类大项目可调高以用满更多上下文再压）> 默认 500K。
+         # 测试可传小值以便低成本触发压缩、验证「压缩链真的通」而不必真塞 500K。
+         self.compact_threshold = _resolve_compact_threshold(compact_threshold)
++        # 单轮输出上限。优先级：显式传参 > 环境变量 CONTEXTFORGE_MAX_TOKENS > 默认 8192。
++        # 与 compact_threshold 同款解析：旧值 2048 对编码 agent 过小（写不完中等文件），故调高（P2）。
++        self.max_tokens = _resolve_max_tokens(max_tokens)
+         # 可用工具集（P5 上下文隔离用）。默认 None = 用全局全集 TOOL_SCHEMAS（主 agent）。
+         # 子 agent 会被传入一个**受限子集**（不含 spawn_subagent），防止无限递归派生。
+         self.tool_schemas = tools if tools is not None else TOOL_SCHEMAS
+@@ -266,7 +295,7 @@ class Agent:
+             # ── Think：调 LLM，让模型决定下一步 ──
+             response = self.client.messages.create(
+                 model=self.model,
+-                max_tokens=2048,
++                max_tokens=self.max_tokens,
+                 tools=self.tool_schemas,     # 本 agent 可用的工具（主=全集，子=受限子集）
+                 messages=self.messages,
+             )
+@@ -450,7 +479,7 @@ class Agent:
+         """
+         resp = self.client.messages.create(
+             model=self.model,
+-            max_tokens=2048,
++            max_tokens=self.max_tokens,
+             messages=[{"role": "user", "content": prompt}],
+         )
+         return "".join(b.text for b in resp.content if b.type == "text")
+diff --git a/tests/test_agent_logic.py b/tests/test_agent_logic.py
+index e0ba4e4..3713779 100644
+--- a/tests/test_agent_logic.py
++++ b/tests/test_agent_logic.py
+@@ -250,6 +250,36 @@ def test_compact_threshold_invalid_env_falls_back(monkeypatch):
+         assert Agent().compact_threshold == COMPACT_THRESHOLD_TOKENS
+ 
+ 
++# ── P2：max_tokens 可配置、默认调高到 8192（旧值 2048 写不完中等文件）──
++
++def test_max_tokens_default(monkeypatch):
++    """不传不设环境 → 用默认 8192（旧硬编码值是 2048，对编码 agent 过小）。"""
++    from contextforge.agent import MAX_TOKENS_DEFAULT
++    monkeypatch.delenv("CONTEXTFORGE_MAX_TOKENS", raising=False)
++    assert MAX_TOKENS_DEFAULT == 8192
++    assert Agent().max_tokens == 8192
++
++
++def test_max_tokens_reads_env(monkeypatch):
++    """CONTEXTFORGE_MAX_TOKENS 环境兜底：可按需调更高（仍在模型硬上限内）。"""
++    monkeypatch.setenv("CONTEXTFORGE_MAX_TOKENS", "16000")
++    assert Agent().max_tokens == 16000
++
++
++def test_explicit_max_tokens_overrides_env(monkeypatch):
++    """显式传参优先于环境变量。"""
++    monkeypatch.setenv("CONTEXTFORGE_MAX_TOKENS", "16000")
++    assert Agent(max_tokens=4096).max_tokens == 4096
++
++
++def test_max_tokens_invalid_env_falls_back(monkeypatch):
++    """环境变量非法（非正整数）→ 兜底回默认 8192，不报错。"""
++    from contextforge.agent import MAX_TOKENS_DEFAULT
++    for bad in ["abc", "-5", "0", ""]:
++        monkeypatch.setenv("CONTEXTFORGE_MAX_TOKENS", bad)
++        assert Agent().max_tokens == MAX_TOKENS_DEFAULT
++
++
+ def test_compact_threshold_1m_80pct_trigger_boundary(monkeypatch):
+     """把阈值设成 1M 窗口的 80%（800K）→ 上下文到 800K 才触发压缩，799,999 不触发。
+ 

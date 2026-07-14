@@ -1,0 +1,27 @@
+{
+  "skill_name": "work-process",
+  "note": "评测锁在快照 commit 657dec3（含 P1/P2/P3 待做、代码干净）。每个子 agent 在从该 commit 新建的独立 git worktree 里跑，互不干扰、跑完丢弃。with_skill 组的 worktree 里拷入 .claude/skills/work-process/；baseline 组不带。prompt 是「真实用户会对做 myagent backlog 的 AI 说的话」，故意不逐字点明 8 步流程——正是要看带不带 skill 时流程完整度的差异。",
+  "evals": [
+    {
+      "id": 0,
+      "name": "p1-bug-parallel-write-race",
+      "prompt": "myagent 的 TODO.md 里有个 P1，说 agent 主循环一轮里所有工具无脑并行、同轮写同一个文件会竞态。你来把这个修了。",
+      "expected_output": "bug 类任务的完整闭环：先跑一个真实反例证明并行写同一文件结果不确定（第3步）→ 给工具加并发安全标记、只读并发写串行（第4步）→ 用同一反例复现验证修好了（第5步）→ 固化成一个测试、且确认它在未修复基线上会 fail（第6步）→ 跑 not e2e 全量回归全绿（第7步）→ PROGRESS.md 顶部追加日志 + commit 不 push（第8步）。",
+      "files": []
+    },
+    {
+      "id": 1,
+      "name": "p2-improve-max-tokens",
+      "prompt": "帮我做一下 myagent TODO.md 里的 P2——max_tokens=2048 太小了，一个大文件一轮都写不完，调高一点。",
+      "expected_output": "改进类任务（无失败反例）的闭环：识别出这不是 bug 而是限制、不硬编假反例，改成先记录改前基线行为（2048 写不完大文件）→ 调高 max_tokens（如 8192，注意两处都改）→ 验证改后行为→ 若可固化则固化有效测试、否则说明为何不固化→ not e2e 回归全绿→ PROGRESS.md 日志 + commit。重点看它会不会因为『没有 bug 反例』而乱套或强行造假反例。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "p3-enhance-compact-keep-user-msgs",
+      "prompt": "myagent 的压缩摘要会把用户原始指令也改写掉，TODO 的 P3 想让压缩时逐字保留用户的原话。你处理下。",
+      "expected_output": "增强类任务的闭环：读 context.py 摘要 prompt 现状（4维、未强制保留用户原话）→ 建立基线（现状会改写用户指令）→ 在摘要 prompt 加一维『逐字保留所有用户原始指令』→ 验证→ 固化一个有效测试（能测出『用户原话被保留』，且在基线会 fail）→ not e2e 回归→ PROGRESS.md 日志 + commit。重点看它固化的测试是否有效（非恒真）。",
+      "files": []
+    }
+  ]
+}

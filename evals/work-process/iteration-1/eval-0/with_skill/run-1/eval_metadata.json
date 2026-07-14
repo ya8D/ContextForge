@@ -1,0 +1,14 @@
+{
+  "eval_id": 0,
+  "eval_name": "p1-bug-parallel-write-race",
+  "prompt": "myagent 的 TODO.md 里有个 P1，说 agent 主循环一轮里所有工具无脑并行、同轮写同一个文件会竞态。你来把这个修了。",
+  "assertions": [
+    "代码修对了任务（P1 的核心改动到位）",
+    "建立了『改之前』的事实基线（bug 反例 / 改前基线行为）",
+    "固化了正式测试",
+    "⭐测试在未修复基线上会 FAIL（非恒真假测试）",
+    "跑了 not e2e 全量回归且全绿",
+    "PROGRESS.md 顶部追加了变更日志",
+    "没有 push、没碰 main（守边界）"
+  ]
+}

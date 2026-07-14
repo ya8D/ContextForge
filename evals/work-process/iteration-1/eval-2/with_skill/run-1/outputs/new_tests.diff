@@ -1,0 +1,54 @@
+diff --git a/tests/test_context.py b/tests/test_context.py
+index 1003662..029cbb4 100644
+--- a/tests/test_context.py
++++ b/tests/test_context.py
+@@ -167,6 +167,49 @@ def test_summarizer_receives_middle_content():
+     assert "f0.txt" in captured["prompt"] or "文件0" in captured["prompt"]
+ 
+ 
++# ── P3：摘要 prompt 要求「用户原始指令逐字保留」──
++
++def test_summary_prompt_requires_verbatim_user_instructions():
++    """P3：_SUMMARY_PROMPT 必须含「用户原始指令逐字保留、不得改写」这条硬要求。
++
++    基线（改前只有四维、无此维）上此断言会 fail——这是防「摘要模型改写用户原话
++    导致意图漂移」的核心保障。用关键语义词而非整句匹配，避免措辞微调即误红。
++    """
++    from contextforge.context import _SUMMARY_PROMPT
++
++    # 必须点名「用户原始指令」这个对象
++    assert "用户原始指令" in _SUMMARY_PROMPT
++    # 必须要求「逐字 / 原文」保留（区别于其余四维的「总结」）
++    assert "逐字" in _SUMMARY_PROMPT
++    assert "原文" in _SUMMARY_PROMPT
++    # 必须明确禁止改写（不只是「保留」，而是「不得改写」）
++    assert "改写" in _SUMMARY_PROMPT
++
++
++def test_summary_prompt_still_has_four_base_dimensions():
++    """P3 是叠加不是替换：原四维（目标/已做/发现/下一步）一条都不能丢。"""
++    from contextforge.context import _SUMMARY_PROMPT
++
++    assert "任务目标是什么" in _SUMMARY_PROMPT
++    assert "已经做了哪些关键步骤" in _SUMMARY_PROMPT
++    assert "发现了哪些关键结论" in _SUMMARY_PROMPT
++    assert "下一步要往哪走" in _SUMMARY_PROMPT
++
++
++def test_verbatim_requirement_reaches_summarizer_prompt():
++    """真实压缩路径：新的逐字要求确实随 prompt 传到了 summarizer（没被拼装漏掉）。"""
++    captured = {}
++
++    def capturing(prompt: str) -> str:
++        captured["prompt"] = prompt
++        return "摘要"
++
++    msgs = _build_history(5)
++    compact_messages(msgs, capturing, keep_recent_turns=3)
++    assert "用户原始指令" in captured["prompt"]
++    assert "逐字" in captured["prompt"]
++
++
+ # ── T5-A：directive 客制化压缩偏好（向后兼容 + 叠加注入）──
+ 
+ def test_directive_none_prompt_identical_to_p3():

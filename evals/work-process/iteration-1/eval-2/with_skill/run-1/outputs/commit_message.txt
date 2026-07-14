@@ -1,0 +1,11 @@
+feat: P3 压缩摘要新增第5维——用户原始指令逐字保留、禁止改写
+
+why: 原四维摘要全是「让模型总结」，天然允许改写措辞；但用户原话是任务权威来源，
+被摘要模型换词/归纳会导致意图漂移，之后每轮都在错误指令上推进。对照 Claude Code
+compact/prompt.ts「所有用户消息逐字保留」，补第5维硬要求（叠加不替换，原四维不丢）。
+
+验证：改进类任务，先立基线（改前 prompt 无逐字保留语义词）；新增3条纯逻辑测试并按
+skill 第6步 stash 验证——核心2条基线 fail、恢复后 pass。全量 not e2e 回归 113 passed。
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+

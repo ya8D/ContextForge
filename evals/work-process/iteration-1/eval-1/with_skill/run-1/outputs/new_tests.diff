@@ -1,0 +1,41 @@
+diff --git a/tests/test_agent_logic.py b/tests/test_agent_logic.py
+index e0ba4e4..3713779 100644
+--- a/tests/test_agent_logic.py
++++ b/tests/test_agent_logic.py
+@@ -250,6 +250,36 @@ def test_compact_threshold_invalid_env_falls_back(monkeypatch):
+         assert Agent().compact_threshold == COMPACT_THRESHOLD_TOKENS
+ 
+ 
++# ── P2：max_tokens 可配置、默认调高到 8192（旧值 2048 写不完中等文件）──
++
++def test_max_tokens_default(monkeypatch):
++    """不传不设环境 → 用默认 8192（旧硬编码值是 2048，对编码 agent 过小）。"""
++    from contextforge.agent import MAX_TOKENS_DEFAULT
++    monkeypatch.delenv("CONTEXTFORGE_MAX_TOKENS", raising=False)
++    assert MAX_TOKENS_DEFAULT == 8192
++    assert Agent().max_tokens == 8192
++
++
++def test_max_tokens_reads_env(monkeypatch):
++    """CONTEXTFORGE_MAX_TOKENS 环境兜底：可按需调更高（仍在模型硬上限内）。"""
++    monkeypatch.setenv("CONTEXTFORGE_MAX_TOKENS", "16000")
++    assert Agent().max_tokens == 16000
++
++
++def test_explicit_max_tokens_overrides_env(monkeypatch):
++    """显式传参优先于环境变量。"""
++    monkeypatch.setenv("CONTEXTFORGE_MAX_TOKENS", "16000")
++    assert Agent(max_tokens=4096).max_tokens == 4096
++
++
++def test_max_tokens_invalid_env_falls_back(monkeypatch):
++    """环境变量非法（非正整数）→ 兜底回默认 8192，不报错。"""
++    from contextforge.agent import MAX_TOKENS_DEFAULT
++    for bad in ["abc", "-5", "0", ""]:
++        monkeypatch.setenv("CONTEXTFORGE_MAX_TOKENS", bad)
++        assert Agent().max_tokens == MAX_TOKENS_DEFAULT
++
++
+ def test_compact_threshold_1m_80pct_trigger_boundary(monkeypatch):
+     """把阈值设成 1M 窗口的 80%（800K）→ 上下文到 800K 才触发压缩，799,999 不触发。
+ 
