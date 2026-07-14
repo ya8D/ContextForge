@@ -284,3 +284,45 @@ def test_compact_by_directive_too_short():
     one = [{"role": "user", "content": "A"}]
     assert compact_by_directive(one, _fake_summarizer, directive="随便压")[1] is None
     assert compact_by_directive([], _fake_summarizer, directive="随便压")[1] is None
+
+
+# ── P3：摘要 prompt 逐字保留用户原始指令 ──
+
+def test_summary_prompt_requires_verbatim_user_instructions():
+    """默认摘要 prompt 含「逐字保留用户原始指令」要求（第 5 维）。
+
+    有效性：基线（4 维、无此要求）上这些关键词全不存在 → 断言 fail；加了第 5 维后 pass。
+    这不是恒真——它锚定「prompt 里确实要求了逐字保留」这一具体行为。
+    """
+    from contextforge.context import _build_summary_prompt
+    p = _build_summary_prompt(None)
+    assert "逐字" in p and "原文" in p and "不得改写" in p, (
+        "摘要 prompt 未要求逐字保留用户原始指令（P3 未实施）"
+    )
+    # 明确点名 [user] 打头的原话（渲染标记），摘要模型才知道保哪些
+    assert "[user]" in p
+
+
+def test_verbatim_requirement_reaches_summarizer_via_compaction():
+    """关键（非恒真）：逐字保留要求真的随压缩路径传到 summarizer——不只是 prompt 里定义了。
+
+    用捕获式假 summarizer 记录它实际收到的 prompt。造够压的历史走 compact_messages，
+    断言 summarizer 收到的 prompt 含逐字保留要求。基线（4 维）上此断言 fail。
+    """
+    captured = {}
+
+    def capturing_summarizer(prompt):
+        captured["prompt"] = prompt
+        return "假摘要"
+
+    # 造头 + 5 轮（>KEEP_RECENT_TURNS=3，中段能切出来压）
+    msgs = [{"role": "user", "content": "任务"}]
+    for i in range(5):
+        msgs.append({"role": "assistant", "content": f"第{i}步"})
+        msgs.append({"role": "user", "content": f"用户第{i}句原话"})
+
+    new_msgs, stats = compact_messages(msgs, summarizer=capturing_summarizer)
+    assert stats is not None, "历史够长应触发压缩"
+    assert "逐字" in captured["prompt"] and "不得改写" in captured["prompt"], (
+        "传给 summarizer 的 prompt 没有逐字保留要求 —— 第 5 维没真正生效"
+    )
