@@ -546,3 +546,37 @@ def test_same_round_write_then_read_sees_new_content(tmp_path):
     assert "NEW_CONTENT_v1" in read_saw and "OLD_CONTENT_v0" not in read_saw, (
         f"同一轮 write 后 read 读到的不是新内容（跨批乱序未修）：read 返回={read_saw!r}"
     )
+
+
+# ── P3：真实 API 验证压缩逐字保留用户原始指令 ──
+
+@pytest.mark.e2e
+def test_compaction_keeps_user_instruction_verbatim():
+    """真实 API：压缩一段含独特用户指令的历史，摘要必须**逐字**保住那句原话（不概括改写）。
+
+    有效性（非恒真）：用一句独特、易被概括的用户指令。基线（摘要 prompt 无逐字要求）下，摘要
+    模型会把它意译/概括（如「只改 login 42-88 行」→「重构登录模块」），原话不会逐字出现 → fail。
+    加了「逐字保留用户原始指令」第 5 维后，原话逐字出现在摘要里 → pass。
+    """
+    unique = "只重构 login_handler.py 第 42 到 88 行，绝对不要碰 auth_middleware"
+    a = Agent()
+    # 造头 + 6 轮（>KEEP_RECENT_TURNS，中段会被压）；中段夹带这句独特用户指令。
+    a.messages = [{"role": "user", "content": "任务：整理认证模块"}]
+    for i in range(6):
+        if i == 1:
+            a.messages.append({"role": "user", "content": unique})
+        a.messages.append({"role": "assistant", "content": f"第{i}步：处理中。"})
+        a.messages.append({"role": "user", "content": f"第{i}步收到。"})
+
+    result = a.compact_now()  # 真调 API 压缩
+    assert "已压缩" in result, f"应触发压缩，实际：{result}"
+
+    body = ""
+    for m in a.messages:
+        c = m.get("content")
+        if isinstance(c, str) and "前情摘要" in c:
+            body = c
+            break
+    assert unique in body, (
+        f"摘要里没有逐字保留用户原始指令（被概括/改写了，指令语义漂移）：\n摘要正文：{body}"
+    )

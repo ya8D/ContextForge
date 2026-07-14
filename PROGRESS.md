@@ -19,6 +19,27 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
 
 ---
 
+## P3：压缩摘要逐字保留用户原始指令（防指令语义漂移）
+
+- **定性**：增强类（无失败反例，走「记录基线」分支）。对照 Claude Code compact prompt「所有用户
+  消息逐字保留、最近任务逐字引用防漂移」。
+- **基线（改前锚点）**：`_SUMMARY_PROMPT` 只有 4 维（任务目标/已做/关键结论/下一步），**无任何
+  逐字保留用户原话的要求**——实证：默认 prompt 里「逐字/原文/不得改写/用户原始指令」5 个关键词全无。
+  摘要模型可自由概括改写用户指令，导致语义漂移（如「只改 login_handler 42-88 行」被概括成「重构登录
+  模块」，范围就变了）。
+- **实施**：给 `_SUMMARY_PROMPT` 补第 5 维——「所有用户原始指令逐字原文保留：凡 `[user]` 打头的用户
+  原话一字不改照抄，不得改写/概括/意译/翻译」。叠加不替换（4 维底线仍在）。渲染 `_render_middle_for_summary`
+  本就给每条消息打 `[role]` 前缀，摘要模型据此识别哪些是用户原话。
+- **验证**：① prompt 5 个逐字关键词全 True（对照基线全 False，翻转）；② **真实 API 压缩**：造含独特
+  用户指令「只重构 login_handler.py 第 42 到 88 行，绝对不要碰 auth_middleware」的历史真跑压缩，摘要里
+  **逐字含这句原话**。
+- **测试有效性**：3 条——2 纯逻辑（prompt 含逐字要求 + 该要求经 compact_messages 真传到 summarizer）+
+  1 真实 API e2e（`test_compaction_keeps_user_instruction_verbatim`：真压缩后断言用户独特原话逐字保留）。
+  `git stash` 验证：基线上 3 条全 FAIL（纯逻辑 prompt 无要求；e2e 摘要模型概括改写了原话）；修复后全 pass。
+- **回归**：`py -m pytest -m "not e2e"` → **123 passed**（原 121 + 2）。
+
+---
+
 ## P2：max_tokens 从写死 2048 → 可配置默认 8192（单轮输出上限，大文件写得完）
 
 - **定性**：改进类（限制，非 bug）。两处硬编码 `max_tokens=2048`（agent.py 的 Think 主调用 +
