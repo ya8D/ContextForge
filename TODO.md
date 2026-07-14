@@ -11,8 +11,9 @@
 （已确认 myagent 做得对/不吃亏的：验证门做成可插拔 check_command、子 agent 不能再派子 agent、
 token 用真实 usage、路径 abspath 归一化——均与 Claude Code 方向一致，无需改。）
 
-- ~~**P1〔真 bug〕并行工具执行不分读写 → 同轮写同一文件是竞态**~~ ✅ **已完成**（见 PROGRESS.md 顶部）
-  - 修法：`@tool` 加 `concurrency_safe` 标记 + `is_concurrency_safe()`；主循环只读并发、有副作用串行。
+- ~~**P1〔真 bug〕并行工具执行不分读写 → 同轮写同一文件是竞态**~~ ✅ **已完成**（part1+part2，见 PROGRESS.md 顶部）
+  - part1：`@tool` 加 `concurrency_safe` 标记 + `is_concurrency_safe()`；只读并发、有副作用串行。
+  - part2：改为**按原始顺序分组**（相邻只读并发、遇写断开串行），修 part1 的「同轮先写后读读到旧内容」乱序。
 - **P2〔明显限制，先修〕`max_tokens=2048` 对编码 agent 过小**
   - 现状：[agent.py](./src/contextforge/agent.py) 两处硬编码 `max_tokens=2048`——连一个中等文件都写不完（也是之前「max_tokens 截断」隐患的根源参数）。
   - 注意：`max_tokens` 是**单轮输出上限**，与 1M **输入**上下文窗口无关；Opus 4.8 单次输出硬上限约 32K。

@@ -378,28 +378,41 @@ class Agent:
                 else:
                     _log("🛡️ [权限]", f"拦截 {block.name} 参数={block.input} —— {reason}", level="error")
 
-            # 执行放行的工具（P1：按并发安全分批）。对照 Claude Code toolOrchestration：
-            # 只读工具（is_concurrency_safe=True，如 read_file）可安全并发；有副作用的
-            # （write_file/run_command/spawn_subagent）**串行**、按模型给出的原始顺序逐个执行——
-            # 否则同轮并行写同一文件是竞态，最终内容由线程调度决定、不确定（TODO P1 实证）。
+            # 执行放行的工具（P1：按并发安全分批，**保持模型给出的原始顺序**）。
+            # 对照 Claude Code toolOrchestration：只把**相邻的连续只读工具**分为一组并发跑；
+            # 一遇到有副作用工具（write_file/run_command/spawn_subagent）就断开、串行执行它，再继续。
+            # 为什么必须保序（P1 part2 修正，真实 API 复现）：早先「所有 read 挑出来先并发、所有 write
+            # 挑出来后串行」的做法打破了原始顺序——模型若在同一轮请求 [write(X,新), read(X)]（先写后
+            # 读回确认），read 会被提前跑、读到**旧内容**。按原始顺序分组则 write 先串行、read 后跑，
+            # 读到新内容，与模型意图一致；同时相邻只读段仍并发，不丢并发收益。
             executed: dict = {}  # block.id -> 执行结果
-            safe_batch = [b for b in to_execute if is_concurrency_safe(b.name)]
-            unsafe_batch = [b for b in to_execute if not is_concurrency_safe(b.name)]
-
-            # 只读安全批：并发执行（read_files 带外注入本实例的「已读集合」——read_file/write_file
-            # 收到它，别的工具忽略；每个 Agent 各写各的 set，并发不竞态、子 agent 不泄漏）。
-            if safe_batch:
-                with ThreadPoolExecutor(max_workers=8) as pool:
-                    results = list(pool.map(
-                        lambda b: execute_tool(b.name, b.input, read_files=self.read_files),
-                        safe_batch,
-                    ))
-                for b, r in zip(safe_batch, results):
-                    executed[b.id] = r
-
-            # 有副作用批：按原始顺序串行执行（不并发，消除同轮写竞态）。
-            for b in unsafe_batch:
-                executed[b.id] = execute_tool(b.name, b.input, read_files=self.read_files)
+            i = 0
+            while i < len(to_execute):
+                if is_concurrency_safe(to_execute[i].name):
+                    # 收集从 i 起**连续的**只读工具，作为一个并发组。
+                    j = i
+                    while j < len(to_execute) and is_concurrency_safe(to_execute[j].name):
+                        j += 1
+                    group = to_execute[i:j]
+                    if len(group) == 1:
+                        b = group[0]
+                        executed[b.id] = execute_tool(b.name, b.input, read_files=self.read_files)
+                    else:
+                        # read_files 带外注入本实例的「已读集合」——read_file/write_file 收到它，别的
+                        # 工具忽略；每个 Agent 各写各的 set，并发不竞态、子 agent 不泄漏。
+                        with ThreadPoolExecutor(max_workers=8) as pool:
+                            results = list(pool.map(
+                                lambda b: execute_tool(b.name, b.input, read_files=self.read_files),
+                                group,
+                            ))
+                        for b, r in zip(group, results):
+                            executed[b.id] = r
+                    i = j
+                else:
+                    # 有副作用工具：串行、就地执行，绝不与前后并发（消除同轮写竞态 + 保序）。
+                    b = to_execute[i]
+                    executed[b.id] = execute_tool(b.name, b.input, read_files=self.read_files)
+                    i += 1
 
             # 组装每个 tool_use 的结果：放行的用真实执行结果，被拦的用拒绝说明。
             tool_results = []

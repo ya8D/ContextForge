@@ -487,3 +487,62 @@ def test_validation_gate_rejects_false_completion(tmp_path):
     assert final.startswith("[未完成]"), (
         f"验证门放行了假完成（final 非护栏串）—— 门没守住。final={final!r}"
     )
+
+
+# ── P1 part2：真实 API 验证「同一轮 write+read 同一文件」按原始顺序执行（不跨批乱序）──
+#
+# 背景：P1 part1 修「同轮写-写竞态」时，把工具按类型分成「read 批先并发、write 批后串行」两大批，
+# 打破了模型原始顺序——模型若同一轮请求 [write(X,新), read(X)]（写完读回确认），read 会被提前跑、
+# 读到旧内容。part2 改成「按原始顺序分组，遇写断开」。本测试**直接命令真实 AI** 同一轮同时
+# write+read 同一文件（聪明模型会自愿规避，故用强命令逼它做），断言 read 读到刚写的新值。
+# 有效性：part1（乱序）实现下 read 读到旧值 → fail；part2 修复后读到新值 → pass。非恒真。
+
+@pytest.mark.e2e
+def test_same_round_write_then_read_sees_new_content(tmp_path):
+    """真实 API：命令 AI 同一轮同时 write+read 同一文件，read 必须读到刚写的新内容（按原始顺序执行）。"""
+    from contextforge.tools import _norm
+    f = str(tmp_path / "note.txt").replace("\\", "/")
+    with open(f, "w", encoding="utf-8") as fh:
+        fh.write("OLD_CONTENT_v0")
+
+    task = (
+        f"这是一个并行工具执行的测试。请在**你这一次回复里、同时**发起两个工具调用（放在同一条消息里）：\n"
+        f"1) write_file：把 {f} 的内容写成 NEW_CONTENT_v1\n"
+        f"2) read_file：读取 {f}\n"
+        f"必须在同一轮里同时发出这两个调用，不要分成两轮、不要只调一个、不要因为担心顺序而改成先写后读——"
+        f"这正是测试要观察的。发出后，如实告诉我 read_file 返回了什么内容。"
+    )
+    a = Agent(max_iterations=6)
+    a.read_files.add(_norm(f))  # 预登记已读，放行 write_file 的先读再改约束
+    a.run(task)
+
+    # 找出「同一轮」同时含 write+read 同文件的那轮，取该轮 read 的 tool_result 返回值。
+    read_saw = None
+    same_round = False
+    for i, m in enumerate(a.messages):
+        c = m.get("content")
+        if m.get("role") != "assistant" or not isinstance(c, list):
+            continue
+        tus = [b for b in c if getattr(b, "type", None) == "tool_use"]
+        w = [b for b in tus if b.name == "write_file"
+             and getattr(b, "input", {}).get("path", "").replace("\\", "/") == f]
+        r = [b for b in tus if b.name == "read_file"
+             and getattr(b, "input", {}).get("path", "").replace("\\", "/") == f]
+        if w and r:
+            same_round = True
+            rid = r[0].id
+            nxt = a.messages[i + 1] if i + 1 < len(a.messages) else None
+            if nxt and isinstance(nxt.get("content"), list):
+                for blk in nxt["content"]:
+                    if isinstance(blk, dict) and blk.get("tool_use_id") == rid:
+                        read_saw = str(blk.get("content"))
+
+    # 若模型不肯同轮读写（个别情况会拒绝），转 skip 而非误判——非 harness 缺陷。
+    if not same_round or read_saw is None:
+        pytest.skip("本次模型未在同一轮同时 write+read（拒绝/拆轮）——无法验证跨批顺序，非实现缺陷")
+
+    # 核心断言（确定性、非恒真）：同一轮里 read 读到的必须是刚写的新内容，不是旧内容。
+    # part1（乱序）下 read 被提前跑、读到 OLD → 此断言 fail；part2 修复后读到 NEW → pass。
+    assert "NEW_CONTENT_v1" in read_saw and "OLD_CONTENT_v0" not in read_saw, (
+        f"同一轮 write 后 read 读到的不是新内容（跨批乱序未修）：read 返回={read_saw!r}"
+    )

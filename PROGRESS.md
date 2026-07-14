@@ -19,6 +19,29 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
 
 ---
 
+## P1 part2：并行分批**保持原始顺序**——修 part1 引入的「同轮先写后读读到旧内容」乱序
+
+**坦白**：part1 的实现（「所有 read 挑出来先并发、所有 write 挑出来后串行」）依赖了一个**不坚实的
+假设**——「模型很少在同一轮里对同一文件又读又写」。写代码要实事求是：这个假设一戳就破。
+
+- **定性**：真 bug（part1 修复自身引入的回归）。part1 按类型分两大批，打破了模型给出的原始顺序：
+  模型若同一轮请求 `[write(X,新), read(X)]`（写完读回确认），read（safe 批）被提前跑、读到**旧内容**。
+- **真实 API 反例（第3步，命令 AI 而非诱导）**：直接命令真实 AI「在同一次回复里同时发起
+  write_file(NEW) + read_file 同一文件」。聪明模型本会自愿规避（它知道有竞态），强命令逼它照做后，
+  在 part1 实现上 read **读到 `OLD_CONTENT_v0`**（模型自己都在回复里点破「读没等写完成」）。
+  修复后同一命令 → read 读到 `NEW_CONTENT_v1`。
+- **修复（解法甲，对照 Claude Code toolOrchestration）**：不再按类型分两大批，改成**按原始顺序扫描**——
+  把**相邻的连续只读工具**分为一组并发跑；一遇有副作用工具就断开、串行执行它，再继续。这样
+  `[write, read]` 里 write 先串行、read 后跑（读到新值），`[read,read,write,read]` 里前两个 read 并发、
+  write 串行、末尾 read 单独跑——顺序完全不乱，相邻只读段仍并发，不丢并发收益。
+- **真实 API e2e 测试（第6步）**：`test_same_round_write_then_read_sees_new_content`（test_e2e.py）——
+  命令 AI 同轮 write+read，断言 read 读到新内容（确定性、非恒真）；模型若拒绝同轮读写则 skip 不误判。
+  `git stash` 验证：part1 基线上 read 读到 OLD → **FAIL**；part2 修复后读到 NEW → pass。
+- **验证**：`py -m pytest -m "not e2e"` → **116 passed**；part1 的写-写串行/只读并发 4 条纯逻辑测试在
+  新实现下仍 pass（保序分组没破坏 part1 保证）；新 e2e 真实 API 跑通。
+
+---
+
 ## P1：并行工具执行分读写——只读并发、有副作用串行（消除同轮写竞态）
 
 对照 Claude Code `toolOrchestration.ts` 的 `isConcurrencySafe` 分批思路，修 TODO P1。用
