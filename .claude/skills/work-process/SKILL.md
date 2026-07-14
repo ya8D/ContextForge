@@ -61,18 +61,24 @@ description: The full closed-loop workflow for completing one TODO.md backlog it
 跑 `py -m pytest -m "not e2e"`（纯逻辑、毫秒级、不烧钱）确认全绿。改动碰了会真调 API 的路径时，
 再挑相关 e2e 单独跑一遍。全绿才算「没引入回归」。
 
-### 8. 收尾：PROGRESS.md 日志 + commit
+### 8. 收尾：PROGRESS.md 日志 + feature 分支 + PR
 - 在 [PROGRESS.md](../../../PROGRESS.md) **顶部**追加一条变更日志：改了什么、为什么、怎么验证的、
   测试结果。时间倒序（最新在最上）。
-- commit（AI 做，本地可逆）。**push 必须由用户本人执行**——绝不代为 push。
-- commit message 说清 why（不只是 what），按项目现有风格。
+- **在 `feat/<任务>` 分支上开发**（如 `feat/p3-compact-keep-user-msgs`），不在 main 上直接改。
+  若一开始就在 main 上动了手，收尾时 `git checkout -b feat/<任务>` 把改动挪到新分支。
+- commit（AI 做，本地可逆），commit message 说清 why（不只是 what），按项目现有风格。
+- 推 **feature 分支** + `gh pr create` 开 PR，PR body 说清做了什么、怎么验证的。
+- **绝不直接碰 main**：不 push main、不合并 PR。main 的更新只能由用户在 GitHub 上 review 后合并
+  ——这是用户练 review、把关合并的关卡。AI 只负责把改动做好、推分支、开 PR，到此为止。
 
 ## 常见反模式（踩过的坑，别再犯）
 - **跳过第 3 步直接改**：没有「改之前」的事实，就无法证明「改之后」真的更好。
 - **固化了恒真测试**：第 6 步不验证「基线会 fail」，就可能留下一个永远 pass、测不出退化的假测试。
 - **用假 client 代替真实 API 后就下结论**：假 client 的行为是你脑补的，真实行为常常不同。
 - **改完不跑全量回归**：只测了改的那块，没发现顺手弄坏了别处。
-- **忘记 PROGRESS.md 日志或擅自 push**：前者违反项目铁律，后者越权（push 是用户的事）。
+- **忘记 PROGRESS.md 日志**：违反项目铁律（每笔改动必追 CHANGELOG）。
+- **直接在 main 上开发 / 推 main / 自己合并 PR**：越权。改动走 `feat/<任务>` 分支 + PR，main 只能由
+  用户在 GitHub review 后合并。AI 到「推分支 + 开 PR」为止。
 
 ## 运行环境备忘（本项目特定）
 - Windows，用 `py` 启动器（bash 里 `python`/`python3` 可能不通）。中文输出加 `PYTHONUTF8=1` 防乱码。
