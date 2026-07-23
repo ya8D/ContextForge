@@ -204,3 +204,42 @@ def test_concurrency_safe_flag_not_in_schema():
     """concurrency_safe 是执行调度用的元信息，不该出现在给模型的 input_schema 里。"""
     rf = next(s for s in TOOL_SCHEMAS if s["name"] == "read_file")
     assert "concurrency_safe" not in rf["input_schema"]["properties"]
+
+
+# ── 结构化工具结果：正文与执行状态分离 ────────────────────────
+
+def test_read_file_success_does_not_guess_status_from_content(tmp_path):
+    """合法正文即使以错误标记开头，读取仍必须是机器可读的成功结果。"""
+    path = tmp_path / "error_log.txt"
+    path.write_text("[错误] 这是文件正文，不是工具失败", encoding="utf-8")
+
+    result = read_file(str(path))
+
+    assert isinstance(result, tools.ToolOutput)
+    assert result == "[错误] 这是文件正文，不是工具失败"
+    assert result.is_error is False
+
+
+def test_missing_file_returns_machine_readable_error(tmp_path):
+    """文件不存在不能只靠中文前缀表达，控制面必须能直接读取 is_error。"""
+    result = read_file(str(tmp_path / "missing.txt"))
+
+    assert isinstance(result, tools.ToolOutput)
+    assert result.is_error is True
+
+
+def test_run_command_nonzero_exit_is_machine_readable_error():
+    """子进程正常启动但退出码非零仍是失败，不能被“有输出/无输出”文本掩盖。"""
+    result = run_command('py -c "import sys; sys.exit(7)"')
+
+    assert isinstance(result, tools.ToolOutput)
+    assert result.is_error is True
+    assert "退出码 7" in result
+
+
+def test_execute_tool_unknown_is_machine_readable_error():
+    """分发层错误也必须沿用同一结构化结果协议。"""
+    result = execute_tool("no_such_structured_tool", {})
+
+    assert isinstance(result, tools.ToolOutput)
+    assert result.is_error is True

@@ -15,7 +15,53 @@
 Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 import →
 标准包布局 → 快速启动命令 → 日志开关 → 客制化 compact → 简历前缺口补齐 →
 **项目更名 ContextForge** → 验证门用户入口 → 指令驱动压缩 → [CF] 前缀+trace 分层 →
-验证门 e2e → 学习笔记（docs/ 9 篇）。
+验证门 e2e → 学习笔记（docs/ 9 篇）→ **Coordinator–Worker–Reviewer 多 Agent 协作 Demo**。
+
+---
+
+## Coordinator–Worker–Reviewer 多 Agent 协作 Demo
+
+- **定位与边界**：完成一个小而完整、可观察、可真实 API 验证的只读协作闭环，对照
+  `agent_learning` 第 16.2～16.5 节。LLM 负责语义规划、文件调查、证据审查和自然语言汇总；Python
+  固定控制 2～4 个 Worker、有界并行、角色生命周期、结构化交接、最多一次定向补充和最终状态。
+  明确不做长任务编排、DAG、checkpoint/恢复、长期记忆、分布式、多层递归和并发写文件。
+- **改前基线**：这是增强类任务，最初先保留新测试、仅缺生产实现时，收集阶段因缺少
+  `AgentRunResult` / 协作模块失败（exit code 2）。收尾又用 pathspec stash 暂时移除当前实现与新增测试，
+  pytest 明确报 `tests/test_collaboration.py` 不存在（exit code 4），恢复后同文件 23 passed；两次都证明旧树
+  没有该能力，而非虚构旧 bug 或留下恒真验收。
+- **Agent 控制面契约**：保留 `run() -> str` 兼容入口，新增 `run_detailed() -> AgentRunResult`，显式返回
+  `succeeded / incomplete / failed`、四项 usage、stop_reason、工具审计、耗时、trace 和错误。只有完整
+  `end_turn` 或成功终态提交才算完成；`max_tokens` / `stop_sequence` / `pause_turn` 标 incomplete，
+  `refusal` 与异常标 failed。任务失败时 messages 与 read_files 作为同一事务回滚，同实例运行明确非重入。
+- **工具层可靠性**：新增实例级 `LocalTool`，让 `submit_plan` / `submit_worker_report` / `submit_review`
+  捕获各角色本次状态而不污染全局注册表；`ToolOutput` 用 `is_error` 提供机器状态，并同步写入 Anthropic
+  `tool_result.is_error`，不再用正文前缀猜错。Agent 构造时原子绑定 schema/handler/并发属性，执行层按
+  实际工具菜单硬拒绝越权调用；Worker/Reviewer 只获 `read_file`，不能写文件、跑命令或派生 Agent。
+- **协作闭环**：Coordinator 通过嵌套 schema 提交 2～4 个 `WorkerTask`；每个 Worker 使用独立
+  messages/read_files/trace，在 `ThreadPoolExecutor` 中有界并行。Worker 必须提交结构化 `Evidence(path,
+  line, claim)`；host 验证路径确实在更早 TAOR 轮成功读取，并按当次读取行数拒绝越界行号。Reviewer 使用
+  全新只读 Agent，必须在更早一轮回读至少一个 evidence 路径，失败 Worker 不得被 accept。
+- **一次定向补充**：Reviewer 只能点名需要补充的 Worker；代码只重跑这些任务一次，并把原任务、上一版
+  报告和反馈一并交给它们。补充证据按 path+line 增量合并；即使补充失败，首轮已核实证据仍保留。
+  Reviewer 自身故障直接令团队失败，不伪装成 revise-all。最终汇总使用一个全新的无工具 Aggregator，
+  只接收精简业务 DTO，不复用规划历史，也不向模型发送 usage、trace、时间戳和工具审计。
+- **可观察性**：每次角色运行形成 `ParticipantRun`；团队 usage 汇总 Coordinator、所有 Worker 尝试、
+  Reviewer、Aggregator，以及参与者内部压缩/子 Agent 回传的 usage。`team.json` 保存计划、结构化报告与审查
+  历史，并以 parent_id、attempt、起止时间、耗时、usage、trace_ref 索引各 Agent 逐轮 trace，不复制
+  messages 或 result_preview。`CONTEXTFORGE_TRACE=off` 时完全跳过团队落盘。
+- **CLI / 文档**：新增 `/team <目标>`，每次创建独立团队，不复用普通会话历史或 `/check`；README、
+  HIGHLIGHTS、CLAUDE 与 TODO 同步，已完成任务从 backlog 移入本日志。
+- **严格审查后的失败基线与修复**：第一版专项/e2e 曾通过，但测试替身预置读取状态、证据未绑定实际路径，
+  存在假绿风险。补写对抗测试后得到 **9 failed, 31 passed**，具体暴露 ToolOutput 缺失、非 end_turn
+  误报成功、read_files 未回滚、tool_result 缺 is_error、终态工具最后一轮误报未完成、LocalTool 可冒用
+  全局名等问题；以上均在通用 Agent/工具层修复，而非只给协作流程打补丁。
+- **最终验证**：协作专项 **23 passed**；全量 `py -m pytest -m "not e2e"` → **150 passed,
+  20 deselected**。真实 API 用例在两个临时文件中藏不同 sentinel，prompt 不泄漏值；实际轨迹中 Coordinator
+  提交 2 个任务、两个 Worker 的 API 运行区间真重叠且各自只读自己的文件、Reviewer 独立回读两个 evidence
+  路径并 accept、全新 Aggregator 正确输出两条路径→sentinel 关系；该 e2e **1 passed in 44.89s**。
+  这取代严格证据门改写前的旧版 e2e 结果。另以 `CONTEXTFORGE_LOG=off` 手动驱动 CLI `/team` 读取
+  README/TODO 第一行：最终 `succeeded + accept`，两条文件:行号事实正确，team.json 可打开且参与者耗时、
+  usage、trace_ref 齐全；屏幕只保留最终答案与团队摘要，没有 TAOR 过程噪声。
 
 ---
 
@@ -603,12 +649,11 @@ compact_by_directive 保头假设被破坏（各路径 messages[0] 恒纯文本 
 以下是 code review 指出的、**当前有意为之或暂未处理**的设计点。如实记下（不假装不存在），
 多数是学习项目的极简取舍，标注「何时该改」以便日后判断。
 
-- **#7 没有 system prompt**：所有指令都塞在 user 任务里，`messages.create` 从不设 `system`。
-  意味着没有持久角色约定，「先读再改/不要蒙混」这类护栏只在 harness 硬拦、模型侧完全不知情
-  （只能被拒后从 tool_result 反推）。何时该改：想让模型主动遵守约定、减少被拒返工时。
-- **#8 `max_tokens=2048` 写死**：Think 调用与压缩摘要都固定 2048。一个能 write_file 的编码 agent，
-  单次输出 2048 token 连中等文件都写不全 → 会被截在 `stop_reason=max_tokens`，而循环没对这种截断
-  做任何处理（只判 tool_use vs 其它）。何时该改：真要用它写大文件 / 长历史摘要时。
+- **#7 没有 system prompt（✅ 已修）**：普通 Agent 仍可不传以保持原请求形态；当前构造器已支持顶层
+  `system_prompt`，Coordinator/Worker/Reviewer/Aggregator 用它建立持久角色边界。Harness 仍负责真正硬拦。
+- **#8 `max_tokens=2048` 写死（✅ 已修）**：已改为「显式 > `CONTEXTFORGE_MAX_TOKENS` > 8192」，
+  主 TAOR 与摘要共同使用；`max_tokens` / `stop_sequence` 现在标记 incomplete，并为可能出现的 tool_use
+  补配对错误结果和未执行审计，不再把截断内容当成功。
 - **#9 验证门对非代码任务也无脑跑检查**：`/check pytest` 后，哪怕问「今天几号」，答完也会强制跑
   pytest；若 pytest 因无关原因失败，纯问答会被反复打回。验证门没有「本任务是否涉及代码」的概念，
   粒度过粗。何时该改：想让验证门只在代码类任务生效时。
@@ -627,9 +672,8 @@ compact_by_directive 保头假设被破坏（各路径 messages[0] 恒纯文本 
   ——那是错误接入点：覆盖写只有新旧行数、无真实 diff，用「净行数差」判掏空**两头都错**（合法精简
   20→8 行被误拦，真掏空 40→40 行全 `pass` 漏过，实测证实）。要可靠区分需 AST 层语义（数断言/空函数体），
   对教学项目过重。故已**彻底移除该函数及接入**，此作弊模式列为已知未处理。何时该改：真要防它时上 AST 分析。
-- **#14 空 content 的 end_turn 返回空串**：模型（或代理）在极端情况下回 `end_turn` 且 `content` 为空时，
-  `run()` 返回 `""`（实测本地代理在 `max_tokens` 很小时确实会这样）。正常任务不触发。何时该改：接入会
-  产生空 content 的端点、或需对空答案做兜底提示时。
+- **#14 空 content 的 end_turn 返回空串（✅ 已修）**：当前将其标为 incomplete，并返回明确的
+  `[未完成] 模型自然结束但没有文本答案。`；协作层不会再把空输出误判为成功。
 - **#15 验证门 `timeout` 无 CLI 入口**：`ValidationGate` 有 `timeout`（默认 300s），但 `/check` 与
   `Agent.__init__` 重建门时都不传，用户无法为慢测试套件配更长超时。功能正确（默认 300 够多数场景），
   仅入口缺失。何时该改：需给验证门跑 >300s 的套件时（加 `/check` 的超时参数或环境变量）。

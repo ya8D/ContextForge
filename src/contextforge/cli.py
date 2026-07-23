@@ -26,6 +26,7 @@ def main() -> int:
     print("  ContextForge —— 输入任务开始；exit/quit 退出；reset 清空记忆")
     print("  /compact [要求] —— 手动压缩历史（可跟一段话指定保留/删除什么）")
     print("  /check [命令] —— 设验证门检查命令（如 /check py -m pytest -q）；空=查看，off=清除")
+    print("  /team <目标> —— 启动 Coordinator → 并行 Workers → Reviewer 只读协作 Demo")
     print(f"  模型：{agent.model}")
     print(f"  可用工具（发给模型的菜单，共 {len(TOOL_SCHEMAS)} 个）：")
     for t in TOOL_SCHEMAS:
@@ -68,6 +69,29 @@ def main() -> int:
                 agent.check_command = arg
                 agent.validation_gate = ValidationGate(check_command=arg)
                 print(f"已设验证门命令：{arg}（下个任务声称完成时会强制跑一遍，失败打回）")
+            continue
+        # 多 Agent 协作 Demo：每次 /team 创建独立团队，不复用普通会话 Agent 的历史/验证门。
+        if task.lower() == "/team" or task.lower().startswith("/team "):
+            goal = task[len("/team"):].strip()
+            if not goal:
+                print("用法：/team <需要多个只读角色协作分析的目标>")
+                continue
+            try:
+                # 延迟 import：普通单 Agent 会话不加载协作控制面，也避免不必要的模块耦合。
+                from contextforge.collaboration import run_team
+                team = run_team(goal)
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:  # noqa: BLE001
+                print(f"\n[团队任务失败] {type(e).__name__}: {e}")
+                continue
+            print("\n" + "=" * 56)
+            print("团队最终答案：", team.final_answer)
+            verdict = team.review.verdict if team.review else "无有效审查"
+            print(f"团队状态：{team.status}；Reviewer：{verdict}")
+            print(f"团队累计 usage：{team.total_usage}")
+            if team.trace_ref:
+                print(f"team trace：{team.trace_ref}")
             continue
 
         # 兜住单次任务的运行异常（API 网络抖动 / 限流 / 模型给了工具坏参数等）：

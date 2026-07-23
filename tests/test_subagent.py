@@ -56,9 +56,10 @@ def test_sub_agent_has_restricted_tools():
 
 
 def test_default_tools_is_full_set():
-    """不传 tools 时默认用全局全集（主 agent 行为不变，向后兼容）。"""
+    """不传 tools 时默认拿全局工具的构造时快照，避免在途请求被热注册换实现。"""
     agent = Agent()
-    assert agent.tool_schemas is TOOL_SCHEMAS
+    assert agent.tool_schemas == TOOL_SCHEMAS
+    assert agent.tool_schemas is not TOOL_SCHEMAS
 
 
 def test_subagent_uses_smaller_iteration_cap():

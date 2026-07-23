@@ -16,10 +16,15 @@ Anthropic 消息形态（与书里 OpenAI 版的关键差异，见 CLAUDE.md 对
 - 是否要工具   → resp.stop_reason == "tool_use"
 """
 
+import copy
+import inspect
 import itertools
 import json
 import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -35,11 +40,14 @@ from contextforge.context import (
 )
 from contextforge.harness import LoopDetector, ValidationGate, check_tool_call
 from contextforge.tools import (
-    TOOL_SCHEMAS,
-    execute_tool,
-    is_concurrency_safe,
+    LocalTool,
+    ToolOutput,
+    bind_tool_schemas,
     subagent_tool_schemas,
     tool,
+    tool_error,
+    tool_schemas_for,
+    tool_success,
 )
 
 # 加载项目根的 .env（代理凭据：ANTHROPIC_AUTH_TOKEN / BASE_URL / MODEL）。
@@ -108,6 +116,8 @@ def _resolve_compact_threshold(explicit: int | None) -> int:
 # 对照 Claude Code：其辅助调用用 4096，主循环有「不够时升级 max_tokens」的机制；本项目不做动态
 # 升级那套（过重），取一个够用的静态默认 + 可配置即可。
 MAX_TOKENS_DEFAULT = 8192
+# Anthropic Python SDK 对预计超过 10 分钟的同步请求强制使用 stream；当前阈值约 21,333。
+_STREAMING_TOKEN_THRESHOLD = 21_333
 
 
 def _resolve_max_tokens(explicit: int | None) -> int:
@@ -136,13 +146,64 @@ def _to_serializable(obj):
     content block 对象（如 TextBlock / ToolUseBlock）。后者不是 dict，
     但都有 .model_dump() 能转成 dict。这里递归处理，让整份 messages 能落盘。
     """
-    if isinstance(obj, list):
+    if isinstance(obj, (list, tuple, set)):
         return [_to_serializable(x) for x in obj]
     if isinstance(obj, dict):
-        return {k: _to_serializable(v) for k, v in obj.items()}
+        return {str(k): _to_serializable(v) for k, v in obj.items()}
     if hasattr(obj, "model_dump"):  # anthropic SDK 的 Pydantic 对象
-        return obj.model_dump()
-    return obj
+        return _to_serializable(obj.model_dump())
+    if isinstance(obj, Path):
+        return str(obj)
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    # trace_metadata 是调用方提供的观测信息，不能让一个不可 JSON 化的值推翻已完成的模型调用。
+    return str(obj)
+
+
+@dataclass
+class AgentRunResult:
+    """一次 Agent.run() 的结构化运行结果；普通 ``run() -> str`` 保持兼容。
+
+    多 Agent 编排不能靠解析 ``[未完成]`` 这类自然语言判断成功失败，也需要汇总每个
+    参与者的 token 和 trace。故额外提供这份控制面结果，而不改变原有调用者拿字符串的契约。
+    对照 agent_learning 第 16.4 节 Supervisor：控制面必须读取可判定的参与者状态。
+    """
+
+    status: str
+    output: str
+    usage: dict[str, int]
+    trace_ref: str | None
+    duration_seconds: float
+    stop_reason: str | None
+    tool_calls: list[dict]
+    error: str | None
+    trace_metadata: dict
+
+
+def _zero_usage() -> dict[str, int]:
+    """创建一份新的四字段 usage 计数器。"""
+    return {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+    }
+
+
+def _usage_dict(usage) -> dict[str, int]:
+    """把 SDK usage 归一化成控制面固定四字段。"""
+    return {
+        "input_tokens": getattr(usage, "input_tokens", 0) or 0,
+        "output_tokens": getattr(usage, "output_tokens", 0) or 0,
+        "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+        "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+    }
+
+
+def _merge_usage(target: dict[str, int], addition: dict[str, int]) -> None:
+    """把一次主调用、压缩调用或子 Agent 调用计入同一运行总账。"""
+    for key in target:
+        target[key] += (addition or {}).get(key) or 0
 
 
 def _truncate_for_feedback(result: str) -> str:
@@ -179,9 +240,15 @@ class Agent:
                  tools: list | None = None,
                  compact_directive: str | None = None,
                  compact_executor: str | None = None,
-                 max_tokens: int | None = None):
-        # 模型 ID 从环境读，不写死（见 CLAUDE.md）。
-        self.model = model or os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8[1m]")
+                 max_tokens: int | None = None,
+                 system_prompt: str | None = None,
+                 local_tools: list[LocalTool] | None = None,
+                 trace_metadata: dict | None = None):
+        # 模型 ID 从环境读，不在源码保留任何兜底 ID（见 CLAUDE.md）。显式参数只用于
+        # 测试/依赖注入；正常 CLI 必须配置 ANTHROPIC_MODEL，漏配时在启动处立即暴露。
+        self.model = model or os.environ.get("ANTHROPIC_MODEL")
+        if not self.model:
+            raise RuntimeError("未配置 ANTHROPIC_MODEL，无法创建 Agent")
         # SDK 自动读取 ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL。
         self.client = anthropic.Anthropic()
         # 硬护栏：循环最多转几轮，防止失控无限循环烧 token（第 1.3 节 护栏）。
@@ -193,9 +260,36 @@ class Agent:
         # （写 .env 持久生效，Chromium 这类大项目可调高以用满更多上下文再压）> 默认 500K。
         # 测试可传小值以便低成本触发压缩、验证「压缩链真的通」而不必真塞 500K。
         self.compact_threshold = _resolve_compact_threshold(compact_threshold)
-        # 可用工具集（P5 上下文隔离用）。默认 None = 用全局全集 TOOL_SCHEMAS（主 agent）。
-        # 子 agent 会被传入一个**受限子集**（不含 spawn_subagent），防止无限递归派生。
-        self.tool_schemas = tools if tools is not None else TOOL_SCHEMAS
+        # schema / handler / 并发属性在 tools.py 的同一注册锁内原子绑定。所有 Agent 都冻结构造时
+        # 能力；运行中热注册不能偷换在途请求的说明书或实现。
+        base_tool_schemas, handlers, concurrency, global_names = bind_tool_schemas(tools)
+
+        # 多 Agent 协作的 submit_* 工具捕获本次运行状态，不写进全局注册表。实例工具名不得
+        # 冒用任何全局工具——否则 Harness 会按全局语义检查参数，执行层却跑另一份 handler。
+        local_tool_list = list(local_tools or [])
+        local_names = [local.name for local in local_tool_list]
+        if len(local_names) != len(set(local_names)):
+            raise ValueError("实例级工具名不能重复")
+        duplicate_names = global_names & set(local_names)
+        if duplicate_names:
+            raise ValueError(f"实例级工具与全局工具重名：{', '.join(sorted(duplicate_names))}")
+        self.local_tools = {local.name: local for local in local_tool_list}
+        self.tool_schemas = [
+            *base_tool_schemas,
+            *(local.schema for local in local_tool_list),
+        ]
+        self._global_tool_handlers = handlers
+        self._global_tool_concurrency = concurrency
+        self.system_prompt = system_prompt
+        self.trace_metadata = copy.deepcopy(trace_metadata or {})
+        # Agent 是有状态会话对象，不支持同实例并发/递归 run。团队并行必须每个 Worker 独占实例；
+        # 锁只做“拒绝重入”，不把两个任务排队到同一份 messages 上悄悄串线。
+        self._run_lock = threading.Lock()
+        # 每次 run() 都会清零；逐轮累加供 run_detailed / team usage 分账读取。
+        self._last_run_usage = _zero_usage()
+        self._last_run_tool_calls: list[dict] = []
+        self._last_stop_reason: str | None = None
+        self._last_run_status = "succeeded"
         # ── T5-A 客制化 compact ──
         # 会话级压缩偏好：被动压缩（到阈值自动触发）默认带上它。
         # 优先级：显式传参 > 环境变量 CONTEXTFORGE_COMPACT_DIRECTIVE（写 .env 持久生效）> None（默认四维）。
@@ -240,39 +334,184 @@ class Agent:
         self.task_counter = 0
 
     def run(self, task: str) -> str:
-        """跑一个任务，返回模型的最终文字答案。"""
-        # 每个任务单独建一个 task_NN 子目录，避免跨任务的 turn 文件互相覆盖。
+        """跑一个任务，返回模型的最终文字答案（旧接口保持不变）。"""
+        if not self._run_lock.acquire(blocking=False):
+            raise RuntimeError("同一个 Agent 实例不能并发或递归运行")
+        try:
+            return self._run_once(task)
+        finally:
+            self._run_lock.release()
+
+    def _run_once(self, task: str) -> str:
+        """持锁执行一次任务，并让失败任务的消息与权限状态一起回滚。"""
+        # 先清零本次状态，再做 trace mkdir 等可能失败的 I/O；早期异常也不能带出上次统计。
+        self._last_run_usage = _zero_usage()
+        self._last_run_tool_calls = []
+        self._last_stop_reason = None
+        self._last_run_status = "succeeded"
+
         self.task_counter += 1
         self.current_task_dir = self.trace_dir / f"task_{self.task_counter:02d}"
         if _trace_enabled():
             self.current_task_dir.mkdir(parents=True, exist_ok=True)
 
-        # 死循环检测是**任务内**概念：清空上个任务残留的 action 指纹，别让任务2 头几轮和任务1
-        # 结尾混在同一滑动窗口里误判/漏判。（区别于有意跨任务保留的 messages / validation_gate——
-        # 那是「短期记忆」；而循环窗口跨任务保留没有语义依据。）
         self.loop_detector.reset()
-
         _log("\n🎯 [任务]", task)
         if _trace_enabled():
             _log("📁 [trace]", f"本任务 in/out 落盘到 {self.current_task_dir}")
-        # 用户任务作为历史的第一条消息。先给「任务开始前的干净历史」拍一份快照：一旦本任务中途
-        # 抛异常（API 抖动/限流等），把 self.messages 整体还原到这份快照——否则会留下一条「有 user 问、
-        # 无 assistant 答」的悬挂消息，下个任务再 append 就变成两条连续 user，污染后续对话。
-        # 为什么用「快照整体还原」而非「记长度按索引截」：本任务中途可能触发压缩，压缩会把
-        # self.messages **整体重写成一条更短的新列表**（保头+摘要+保尾）——此时旧长度索引已失真，
-        # `del [旧长度:]` 截不掉悬挂消息、还留着压缩摘要，回滚失效。快照法无视中途怎么重写，
-        # 都能精确还原到任务开始前。用 `list(...)` 浅拷贝：消息 dict 本身不被本任务原地改，够用。
+
+        # messages 代表模型知道什么，read_files 代表模型基于这些内容获得的写权限；二者必须作为
+        # 同一事务回滚。否则任务读文件后 API 失败，历史已忘记正文，下一任务却仍能直接覆盖文件。
         _msgs_snapshot = list(self.messages)
+        _read_files_snapshot = set(self.read_files)
         self.messages.append({"role": "user", "content": task})
 
         try:
-            return self._run_loop()
-        except Exception:
-            # 失败 → 把历史整体还原到任务开始前的快照（丢掉悬挂 user + 本任务中间轮 + 可能的压缩改写），
-            # 再把异常抛给上层（CLI 会兜住、提示可重试）。用切片赋值原地恢复，不换 list 对象（引用语义
-            # 与别处一致）。
+            result = self._run_loop()
+            if self._last_run_status == "failed":
+                self.messages[:] = _msgs_snapshot
+                self.read_files.clear()
+                self.read_files.update(_read_files_snapshot)
+            return result
+        except BaseException:
+            self._last_run_status = "failed"
             self.messages[:] = _msgs_snapshot
+            self.read_files.clear()
+            self.read_files.update(_read_files_snapshot)
             raise
+
+    def run_detailed(self, task: str) -> AgentRunResult:
+        """执行一次 TAOR，并原子快照控制面结果（对照 agent_learning 第 16.4 节）。"""
+        started = time.perf_counter()
+        if not self._run_lock.acquire(blocking=False):
+            return AgentRunResult(
+                status="failed",
+                output="",
+                usage=_zero_usage(),
+                trace_ref=None,
+                duration_seconds=time.perf_counter() - started,
+                stop_reason=None,
+                tool_calls=[],
+                error="RuntimeError: 同一个 Agent 实例不能并发或递归运行",
+                trace_metadata=copy.deepcopy(self.trace_metadata),
+            )
+
+        error = None
+        try:
+            try:
+                output = self._run_once(task)
+                status = self._last_run_status
+            except Exception as exc:  # noqa: BLE001 —— 结构化记录给协调器
+                status = "failed"
+                output = ""
+                error = f"{type(exc).__name__}: {exc}"
+            duration = time.perf_counter() - started
+            trace_ref = (
+                str(getattr(self, "current_task_dir", self.trace_dir))
+                if _trace_enabled() else None
+            )
+            if status != "succeeded" and error is None:
+                error = output or "Agent 未完成任务"
+            return AgentRunResult(
+                status=status,
+                output=output,
+                usage=dict(self._last_run_usage),
+                trace_ref=trace_ref,
+                duration_seconds=duration,
+                stop_reason=self._last_stop_reason,
+                tool_calls=copy.deepcopy(self._last_run_tool_calls),
+                error=error,
+                trace_metadata=copy.deepcopy(self.trace_metadata),
+            )
+        finally:
+            self._run_lock.release()
+
+    def tool_calls_snapshot(self) -> list[dict]:
+        """返回本次运行工具记录的独立快照，供证据门按路径与 TAOR 轮次核验。"""
+        return copy.deepcopy(self._last_run_tool_calls)
+
+    def has_executed_tool(self, name: str, *, succeeded: bool = False) -> bool:
+        """本次 run 中某工具是否真正执行过；可要求执行结果成功。"""
+        return any(
+            call["name"] == name
+            and call.get("executed", False)
+            and (not succeeded or call.get("succeeded", False))
+            for call in self._last_run_tool_calls
+        )
+
+    def _execute_tool(self, name: str, tool_input: dict) -> ToolOutput:
+        """分发实例级或绑定后的全局工具，并统一机器可读结果语义。"""
+        local = self.local_tools.get(name)
+        if local is not None:
+            try:
+                result = local.handler(copy.deepcopy(tool_input))
+            except Exception as exc:  # noqa: BLE001 —— 错误回喂让模型纠正
+                return tool_error(f"[错误] 实例工具 {name} 执行异常：{exc}")
+            if isinstance(result, ToolOutput):
+                return result
+            if isinstance(result, str):
+                # 普通字符串只代表成功；失败必须显式返回 tool_error，不能再猜正文前缀。
+                return tool_success(result)
+            return tool_error(
+                f"[错误] 实例工具 {name} 返回类型不合法：{type(result).__name__}"
+            )
+
+        # 全局工具也使用构造时原子绑定的 handler，确保执行实现与发给模型的 schema 同版本。
+        func = self._global_tool_handlers.get(name)
+        if func is None:
+            return tool_error(f"[错误] 未知工具：{name}")
+        signature = inspect.signature(func)
+        call_kwargs = {
+            key: copy.deepcopy(value)
+            for key, value in tool_input.items()
+            if not str(key).startswith("_")
+        }
+        injected = {
+            "_read_files": self.read_files,
+            "_model": self.model,
+            "_max_tokens": self.max_tokens,
+            "_parent_trace": str(getattr(self, "current_task_dir", self.trace_dir)),
+        }
+        for parameter, value in injected.items():
+            if parameter in signature.parameters:
+                call_kwargs[parameter] = value
+        try:
+            signature.bind(**call_kwargs)
+        except TypeError as exc:
+            return tool_error(f"[错误] 工具 {name} 参数不对：{exc}")
+        try:
+            result = func(**call_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            return tool_error(f"[错误] 工具 {name} 执行异常：{exc}")
+        if isinstance(result, ToolOutput):
+            return result
+        if isinstance(result, str):
+            # 普通字符串只代表成功；失败必须显式返回 tool_error，避免合法正文前缀误判。
+            return tool_success(result)
+        return tool_error(f"[错误] 工具 {name} 返回类型不合法：{type(result).__name__}")
+
+    def _is_concurrency_safe(self, name: str) -> bool:
+        """实例工具优先；全局工具使用构造时绑定的并发属性快照。"""
+        local = self.local_tools.get(name)
+        if local is not None:
+            return local.concurrency_safe
+        return self._global_tool_concurrency.get(name, False)
+
+    def _record_unexecuted_tool_uses(self, tool_use_blocks, turn: int, reason: str) -> None:
+        """审计因停止原因而未进入 Act 的工具请求，避免控制面静默漏记。"""
+        allowed_names = {schema["name"] for schema in self.tool_schemas}
+        for block in tool_use_blocks:
+            self._last_run_tool_calls.append({
+                "tool_use_id": block.id,
+                "name": block.name,
+                "input": _to_serializable(block.input),
+                "turn": turn,
+                "sequence": len(self._last_run_tool_calls),
+                "allowed": block.name in allowed_names,
+                "executed": False,
+                "succeeded": False,
+                "reason": reason,
+            })
 
     def _pair_pending_tool_uses(self, tool_use_blocks, note: str) -> dict:
         """给一组「未执行」的 tool_use 生成一条配对的 user(tool_result) 消息（审查 #1）。
@@ -286,7 +525,12 @@ class Agent:
         return {
             "role": "user",
             "content": [
-                {"type": "tool_result", "tool_use_id": b.id, "content": note}
+                {
+                    "type": "tool_result",
+                    "tool_use_id": b.id,
+                    "content": note,
+                    "is_error": True,
+                }
                 for b in tool_use_blocks
             ],
         }
@@ -296,26 +540,31 @@ class Agent:
         for i in range(1, self.max_iterations + 1):
             _log(f"\n🔄 ===== TAOR 第 {i}/{self.max_iterations} 轮 =====", "")
 
-            # 快照「这一轮实际发给 API 的 messages」——就是当前 self.messages。
-            # 每轮都发完整历史；落盘后可对比多轮 messages 证明这一点。
-            messages_sent = _to_serializable(self.messages)
+            # trace 关闭时不复制完整历史；多轮大文件会话里这能避免无收益的近 O(n²) 序列化。
+            messages_sent = _to_serializable(self.messages) if _trace_enabled() else None
 
             # ── Think：调 LLM，让模型决定下一步 ──
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                tools=self.tool_schemas,     # 本 agent 可用的工具（主=全集，子=受限子集）
-                messages=self.messages,
-            )
-
-            # 取出 usage 的 4 个关键字段（cache 字段可能不存在，用 getattr 兜底）。
-            u = response.usage
-            usage = {
-                "input_tokens": u.input_tokens,                                   # 未缓存的新增量（付全价）
-                "output_tokens": u.output_tokens,                                 # 本轮生成
-                "cache_creation_input_tokens": getattr(u, "cache_creation_input_tokens", None),  # 写入缓存
-                "cache_read_input_tokens": getattr(u, "cache_read_input_tokens", None),          # 从缓存读（≈0.1 价）
+            request = {
+                "model": self.model,
+                "max_tokens": self.max_tokens,
+                "messages": self.messages,
             }
+            # 有工具才传 tools；最终 Coordinator 汇总阶段是纯文本调用，空列表直接省略更符合 API 语义。
+            if self.tool_schemas:
+                request["tools"] = self.tool_schemas
+            # Anthropic 的 system 是顶层参数，不塞进 messages；None 时不传，保证普通 Agent 请求
+            # 形态与旧实现一致。Coordinator/Worker/Reviewer 用它形成真正的角色分工。
+            if self.system_prompt:
+                request["system"] = self.system_prompt
+            if self.max_tokens > _STREAMING_TOKEN_THRESHOLD:
+                with self.client.messages.stream(**request) as stream:
+                    response = stream.get_final_message()
+            else:
+                response = self.client.messages.create(**request)
+
+            usage = _usage_dict(response.usage)
+            self._last_stop_reason = response.stop_reason
+            _merge_usage(self._last_run_usage, usage)
 
             # 落盘：这一轮的完整 in（messages_sent）+ 本轮模型输出（response.content）+ usage。
             self._dump_turn(i, messages_sent, usage, response.stop_reason, response.content)
@@ -340,30 +589,70 @@ class Agent:
                 if block.type == "text" and block.text.strip():
                     _log("💬 [模型]", block.text.strip())
 
-            # 注：审查曾提 #2「max_tokens 在 tool_use 中途截断→半截 tool_use 留在历史→下轮 400」。
-            # 但真实 API 复现证明：当前本地代理**从不返回 stop_reason=="max_tokens"**（即使
-            # max_tokens=16 也回 end_turn + 截短内容），故此隐患在本运行环境**不可达**，不加处理。
-            # 若日后换用原生 Anthropic 端点（真会返回 max_tokens），需在此补「补配对 tool_result +
-            # 打回」的处理（同 #1 的 _pair_pending_tool_uses 思路）。
-
-            # ── 判断：模型是否要调工具？ ──
-            if response.stop_reason != "tool_use":
-                # 模型不要工具了 —— 但先别急着放它走。
-                # ③ 验证门（对照第 8.2 支柱三，成功率提升最大的一项）：
-                # 若任务配了检查命令，声称完成前强制跑一遍，过了才算真完成。
-                final = "".join(b.text for b in response.content if b.type == "text")
+            # ── 判断：只有 end_turn 才是完整自然结束 ──
+            final = "".join(b.text for b in response.content if b.type == "text")
+            if response.stop_reason == "refusal":
+                # 拒绝不是可复用会话历史：移除刚追加的 assistant refusal，保留用户任务，调用方可
+                # 换模型/提示后继续；run_detailed 仍如实标 failed。
+                self.messages.pop()
+                self._last_run_status = "failed"
+                return final or "[拒绝] 模型拒绝完成本次任务。"
+            if response.stop_reason == "pause_turn":
+                # pause_turn 正常只包含服务端工具状态；若同时出现客户端 tool_use，必须先本地执行并
+                # 配对，不能直接 assistant→assistant 重放。保守标 incomplete，让调用方重试。
+                pending = [block for block in response.content if block.type == "tool_use"]
+                if pending:
+                    reason = "pause_turn 响应含客户端 tool_use，等待显式重试"
+                    self._record_unexecuted_tool_uses(pending, i, reason)
+                    self.messages.append(self._pair_pending_tool_uses(
+                        pending,
+                        f"[未执行] {reason}。",
+                    ))
+                    self._last_run_status = "incomplete"
+                    return "[未完成] pause_turn 含客户端工具调用。"
+                # 纯服务端工具状态已在上面追加，下一次 Think 原样续传。
+                continue
+            if response.stop_reason in {"max_tokens", "stop_sequence"}:
+                # 原生端点可能在 max_tokens 时留下 tool_use block。它已经进入历史，先补错误结果
+                # 保证下一任务重放历史时仍满足 tool_use/tool_result 配对，再如实标记 incomplete。
+                pending = [block for block in response.content if block.type == "tool_use"]
+                if pending:
+                    reason = f"模型因 {response.stop_reason} 停止，工具参数可能不完整"
+                    self._record_unexecuted_tool_uses(pending, i, reason)
+                    self.messages.append(self._pair_pending_tool_uses(
+                        pending,
+                        f"[未执行] {reason}。",
+                    ))
+                self._last_run_status = "incomplete"
+                partial = final.strip()
+                return (
+                    f"[未完成] stop_reason={response.stop_reason}"
+                    + (f"\n{partial}" if partial else "")
+                )
+            if response.stop_reason == "end_turn":
+                if not final.strip():
+                    self._last_run_status = "incomplete"
+                    return "[未完成] 模型自然结束但没有文本答案。"
                 passed, report = self.validation_gate.verify(self._run_check)
                 if passed:
-                    _log("\n✅ [完成]", "模型未再请求工具，且通过验证门，循环结束。")
+                    # 压缩是可观测性/成本优化，不能反过来推翻已经完成且通过验证的业务答案。
+                    # summarizer 异常时保留原历史并交付 final，下个任务仍可继续。
+                    try:
+                        self._maybe_compact(usage)
+                    except Exception as exc:  # noqa: BLE001
+                        _log("🗜️ [压缩失败]", f"保留原历史：{type(exc).__name__}: {exc}", level="error")
+                    _log("\n✅ [完成]", "模型自然结束，且通过验证门，循环结束。")
                     return final
-                # 没过验证门 → 把失败报告当 user 消息打回去，让模型继续修，不放行。
                 _log("\n🚧 [验证门]", "未通过，打回让模型继续修复。", level="error")
                 self.messages.append({
                     "role": "user",
                     "content": (f"[验证门] 你声称完成了，但强制检查未通过。"
                                 f"不要删除或修改检查/测试来蒙混，请修复真正的问题后继续。\n{report}"),
                 })
-                continue  # 回到 Think，让模型据此继续
+                continue
+            if response.stop_reason != "tool_use":
+                self._last_run_status = "incomplete"
+                return final or f"[未完成] 未识别的 stop_reason={response.stop_reason}"
 
             # ── Act + Observe：先过 harness 关卡，再并行执行 ──
             # 先挑出这一轮所有的 tool_use 块（模型可能一轮请求多个）。
@@ -380,20 +669,27 @@ class Agent:
             self.loop_detector.record_round(tool_use_blocks)
             if self.loop_detector.is_looping():
                 _log("\n🔁 [死循环]", "连续多轮相同 action，注入换思路提示、打断。", level="error")
-                # 审查 #1：本轮的 tool_use 已在上面 append 进历史，但死循环分支不执行它们、
-                # 也没生成配对 tool_result。若直接 append 纯文本提示，下一轮就把
-                # 「assistant(tool_use)+user(纯文本)」发出 → Anthropic 400 `tool_use ids without
-                # tool_result`，穿到 run() except 整任务回滚失败——死循环「保护」反把任务弄崩。
-                # 故先补齐占位 tool_result 消除 400 隐患，再注入换思路提示。
-                self.messages.append(self._pair_pending_tool_uses(
-                    tool_use_blocks, "[被 harness 中断] 检测到死循环，本次工具调用未执行。"))
+                note = "[被 harness 中断] 检测到死循环，本次工具调用未执行。"
+                for block in tool_use_blocks:
+                    self._last_run_tool_calls.append({
+                        "tool_use_id": block.id,
+                        "name": block.name,
+                        "input": _to_serializable(block.input),
+                        "turn": i,
+                        "sequence": len(self._last_run_tool_calls),
+                        "allowed": False,
+                        "executed": False,
+                        "succeeded": False,
+                        "reason": "检测到死循环",
+                    })
+                self.messages.append(self._pair_pending_tool_uses(tool_use_blocks, note))
                 self.messages.append({
                     "role": "user",
                     "content": ("[死循环检测] 你连续多次重复了完全相同的操作但没有进展。"
                                 "请停下来换一个思路：换个命令/参数、或换个角度分析问题，"
                                 "不要再重复刚才那个动作。"),
                 })
-                continue  # 回到 Think
+                continue
 
             # ① 权限关卡（对照第 8.2 支柱二）：执行前逐个过 check_tool_call。
             # 命中危险（rm -rf / 路径遍历等）→ 不执行，把拒绝原因当结果回喂让模型换做法。
@@ -401,9 +697,30 @@ class Agent:
             # 先算好每个工具「放行/拒绝」，放行的才真正并行执行。
             gate_results: list[tuple] = []  # (block, 是否放行, 拒绝原因或 None)
             to_execute = []                  # 放行的 block（送去并行执行）
+            # 本轮实际发给模型的菜单就是唯一授权源；不要再维护可漂移的名称快照。
+            current_allowed = {schema["name"] for schema in self.tool_schemas}
             for block in tool_use_blocks:
-                ok, reason = check_tool_call(block.name, block.input)
-                gate_results.append((block, ok, None if ok else reason))
+                if block.name not in current_allowed:
+                    # 工具菜单不是安全边界：模型即使幻觉出没展示的工具名，也必须在执行层硬拒绝。
+                    ok, reason = False, f"工具 {block.name} 不在本 Agent 的授权工具白名单中（未授权）"
+                else:
+                    try:
+                        ok, reason = check_tool_call(block.name, block.input)
+                    except (AttributeError, TypeError, ValueError) as exc:
+                        ok, reason = False, f"工具参数不合法：{exc}"
+                call_record = {
+                    "tool_use_id": block.id,
+                    "name": block.name,
+                    "input": _to_serializable(block.input),
+                    "turn": i,
+                    "sequence": len(self._last_run_tool_calls),
+                    "allowed": ok,
+                    "executed": False,
+                    "succeeded": False,
+                    "reason": None if ok else reason,
+                }
+                self._last_run_tool_calls.append(call_record)
+                gate_results.append((block, ok, None if ok else reason, call_record))
                 if ok:
                     to_execute.append(block)
                 else:
@@ -416,24 +733,33 @@ class Agent:
             # 挑出来后串行」的做法打破了原始顺序——模型若在同一轮请求 [write(X,新), read(X)]（先写后
             # 读回确认），read 会被提前跑、读到**旧内容**。按原始顺序分组则 write 先串行、read 后跑，
             # 读到新内容，与模型意图一致；同时相邻只读段仍并发，不丢并发收益。
+            # SDK 约定同一响应的 tool_use_id 唯一；本地先校验，避免重复 ID 导致结果覆盖/错配。
+            ids = [block.id for block in tool_use_blocks]
+            if len(ids) != len(set(ids)):
+                self.messages.append(self._pair_pending_tool_uses(
+                    tool_use_blocks,
+                    "[未执行] 同一响应出现重复 tool_use_id，无法安全配对结果。",
+                ))
+                self._last_run_status = "failed"
+                return "[错误] 模型返回重复 tool_use_id。"
             executed: dict = {}  # block.id -> 执行结果
             i = 0
             while i < len(to_execute):
-                if is_concurrency_safe(to_execute[i].name):
+                if self._is_concurrency_safe(to_execute[i].name):
                     # 收集从 i 起**连续的**只读工具，作为一个并发组。
                     j = i
-                    while j < len(to_execute) and is_concurrency_safe(to_execute[j].name):
+                    while j < len(to_execute) and self._is_concurrency_safe(to_execute[j].name):
                         j += 1
                     group = to_execute[i:j]
                     if len(group) == 1:
                         b = group[0]
-                        executed[b.id] = execute_tool(b.name, b.input, read_files=self.read_files)
+                        executed[b.id] = self._execute_tool(b.name, b.input)
                     else:
                         # read_files 带外注入本实例的「已读集合」——read_file/write_file 收到它，别的
                         # 工具忽略；每个 Agent 各写各的 set，并发不竞态、子 agent 不泄漏。
                         with ThreadPoolExecutor(max_workers=8) as pool:
                             results = list(pool.map(
-                                lambda b: execute_tool(b.name, b.input, read_files=self.read_files),
+                                lambda b: self._execute_tool(b.name, b.input),
                                 group,
                             ))
                         for b, r in zip(group, results):
@@ -442,36 +768,66 @@ class Agent:
                 else:
                     # 有副作用工具：串行、就地执行，绝不与前后并发（消除同轮写竞态 + 保序）。
                     b = to_execute[i]
-                    executed[b.id] = execute_tool(b.name, b.input, read_files=self.read_files)
+                    executed[b.id] = self._execute_tool(b.name, b.input)
                     i += 1
 
-            # 组装每个 tool_use 的结果：放行的用真实执行结果，被拦的用拒绝说明。
+            # 组装 Observe：机器状态直接来自 ToolOutput.is_error，并同步进 Anthropic is_error。
             tool_results = []
-            for block, ok, reason in gate_results:
+            terminal_succeeded = False
+            any_tool_error = False
+            for block, ok, reason, call_record in gate_results:
                 if ok:
                     result = executed[block.id]
+                    call_record["executed"] = True
+                    call_record["succeeded"] = not result.is_error
+                    raw_result = str(result)
+                    call_record["result_preview"] = raw_result[:300]
+                    if block.name == "read_file" and not result.is_error:
+                        # evidence 只能引用模型实际看到的读取范围；超长结果在 50K 处截断，不能把
+                        # 截断后未回喂的行也算作“已读”。末尾半行仍可见，splitlines 会计入。
+                        call_record["line_count"] = len(
+                            raw_result[:_MAX_RESULT_CHARS].splitlines()
+                        )
+                    if result.trace_ref:
+                        call_record["trace_ref"] = result.trace_ref
+                    _merge_usage(self._last_run_usage, result.usage)
                     _log("🦾 [Act]", f"调用工具 {block.name}  参数={block.input}")
-                    preview = result if len(result) <= 300 else result[:300] + " …(打印截断)"
+                    preview = str(result) if len(result) <= 300 else str(result)[:300] + " …(打印截断)"
                     _log("👀 [Observe]", preview)
-                    content = _truncate_for_feedback(result)
+                    content = _truncate_for_feedback(str(result))
+                    is_error = result.is_error
+                    any_tool_error = any_tool_error or is_error
+                    local = self.local_tools.get(block.name)
+                    terminal_succeeded = terminal_succeeded or bool(
+                        local and local.terminal and not result.is_error
+                    )
                 else:
-                    # 被 harness 拦下：把拒绝原因作为结果回喂（is_error 标记让模型知道这是错误）。
                     content = f"[被 harness 拒绝] {reason}。请改用更安全的做法。"
+                    is_error = True
+                    any_tool_error = True
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
                     "content": content,
+                    "is_error": is_error,
                 })
 
-            # 所有工具结果作为一条 user 消息回喂 → Repeat（回到 Think）
+            # 先保存配对 tool_result，再让成功终态工具结束；trace/history 始终保持协议完整。
             self.messages.append({"role": "user", "content": tool_results})
+            if terminal_succeeded and not any_tool_error:
+                passed, report = self.validation_gate.verify(self._run_check)
+                if passed:
+                    _log("\n✅ [完成]", "终态结构化提交已接收，且通过验证门。")
+                    return "结构化结果已提交。"
+                _log("\n🚧 [验证门]", "终态提交后检查未通过，标记未完成。", level="error")
+                self._last_run_status = "incomplete"
+                return f"[未完成] 终态提交后的验证门未通过。\n{report}"
 
-            # ── 上下文压缩（P3）：用本轮真实 usage 判断规模，超阈值就压 ──
-            # 放在回喂之后、进下一轮 Think 之前：这样下一轮发出去的就是压缩后的历史。
-            # 刚追加的 assistant 输出 + tool_result 属于"最近几轮"，压缩会保留原文，不受影响。
             self._maybe_compact(usage)
 
-        # 达到最大轮数还没结束 —— 护栏触发。
+        # 达到最大轮数还没结束 —— 护栏触发。结构化接口必须把它标成 incomplete，
+        # 不能再让编排层看到一个非空字符串就误以为成功。
+        self._last_run_status = "incomplete"
         _log("\n⛔ [护栏]", f"达到最大轮数 {self.max_iterations}，强制停止。", level="error")
         return "[未完成] 达到最大迭代轮数。"
 
@@ -492,10 +848,14 @@ class Agent:
         payload = {
             "turn": turn,
             "model": self.model,
+            "max_tokens": self.max_tokens,
+            "system": self.system_prompt,
+            "tools": _to_serializable(self.tool_schemas),
             "stop_reason": stop_reason,
             "usage": usage,
-            "messages_sent": messages_sent,          # 这一轮实际发给 API 的完整历史（输入侧）
-            "response_content": _to_serializable(response_content),  # 本轮模型输出（输出侧）
+            "trace_metadata": _to_serializable(self.trace_metadata),
+            "messages_sent": messages_sent,
+            "response_content": _to_serializable(response_content),
         }
         path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -508,12 +868,23 @@ class Agent:
         只把要总结的文本作为一条 user 消息发过去，拿回摘要文字。
         不带 tools、不带 self.messages，是一次干净的一次性调用。
         """
-        resp = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return "".join(b.text for b in resp.content if b.type == "text")
+        request = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if self.max_tokens > _STREAMING_TOKEN_THRESHOLD:
+            with self.client.messages.stream(**request) as stream:
+                resp = stream.get_final_message()
+        else:
+            resp = self.client.messages.create(**request)
+        _merge_usage(self._last_run_usage, _usage_dict(resp.usage))
+        if resp.stop_reason != "end_turn":
+            raise RuntimeError(f"压缩摘要未完整结束：stop_reason={resp.stop_reason}")
+        summary = "".join(b.text for b in resp.content if b.type == "text").strip()
+        if not summary:
+            raise RuntimeError("压缩摘要为空")
+        return summary
 
     def _run_check(self, command: str, timeout: int = 300) -> tuple[int | None, str]:
         """验证门的 runner 回调：跑检查命令（如 pytest）拿 (退出码, 输出)。
@@ -534,12 +905,18 @@ class Agent:
         子 agent 的中间过程留在它自己的 messages 里，只回传最终摘要。
         """
         sub = Agent(
-            tools=subagent_tool_schemas(),
+            model=self.model,
+            # 压缩只需回读/检索核实，绝不需要 write_file；能力边界在派生点正向声明。
+            tools=tool_schemas_for({"read_file", "run_command"}),
             max_iterations=15,
-            # 验证门是**主任务**概念：子 agent 只是去做个小活（回读核实），不该继承主任务的
-            # check_command。若不显式传 None，它会回退读 CONTEXTFORGE_CHECK_COMMAND 环境变量，
-            # 被无关的检查命令（如 pytest）反复打回、撞 max_iterations 返回垃圾结论。
             check_command=None,
+            # 防压缩子 Agent 再按环境变量派生压缩子子 Agent；一层派生是代码硬边界。
+            compact_executor="self",
+            trace_metadata={
+                **self.trace_metadata,
+                "role": "compact_subagent",
+                "parent_trace": str(getattr(self, "current_task_dir", self.trace_dir)),
+            },
         )
         task = (
             "你是一个上下文压缩助手。下面给你一段 agent 的中间对话历史和压缩要求。"
@@ -547,36 +924,41 @@ class Agent:
             "read_file / run_command **回读核实**它现在是否还成立，再据实写进摘要。"
             "只输出摘要正文。\n\n" + prompt
         )
-        return sub.run(task)
+        detail = sub.run_detailed(task)
+        _merge_usage(self._last_run_usage, detail.usage)
+        if detail.status != "succeeded" or not detail.output.strip():
+            raise RuntimeError(detail.error or "压缩子 Agent 未完整产出摘要")
+        return detail.output
 
     def _pick_summarizer(self):
         """按 self.compact_executor 选压缩执行者回调（self=盲总结 / subagent=带工具核实）。"""
         return self._summarize_via_subagent if self.compact_executor == "subagent" else self._summarize
 
     def compact_now(self, directive: str | None = None) -> str:
-        """主动压缩入口（供 CLI 的 /compact 调用）：用户说压就压，不看 usage 阈值。
-
-        directive：用户当场输入的压缩要求；None 时回退到会话级 self.compact_directive。
-        返回一句人类可读的结果行。够轮数才压，不够则如实说未压。
-        """
-        directive = directive or self.compact_directive
-        new_messages, stats = compact_messages(
-            self.messages, summarizer=self._pick_summarizer(), directive=directive,
-        )
-        if stats is None and directive:
-            # 轮数不足以走结构化压缩，但用户给了明确要求 → 降级为「指令驱动压缩」
-            # （保头 messages[0] + 保尾最近 1 轮 + 中间纯按 directive 压）。
-            new_messages, stats = compact_by_directive(
-                self.messages, summarizer=self._pick_summarizer(), directive=directive,
+        """主动压缩入口；与 TAOR 共用运行锁，不能并发改写会话历史。"""
+        if not self._run_lock.acquire(blocking=False):
+            raise RuntimeError("Agent 正在运行，不能同时压缩历史")
+        try:
+            directive = directive or self.compact_directive
+            summarizer = self._pick_summarizer()
+            new_messages, stats = compact_messages(
+                self.messages, summarizer=summarizer, directive=directive,
             )
-        if stats is None:
-            # 裸 /compact（无 directive）轮数不足，或历史短到连 1 轮中间都切不出。
-            return "轮数不足以压缩（中段为空），本次未压缩。"
-        self.messages = new_messages
-        note = f"（按要求：{directive}）" if directive else ""
-        return (f"已压缩{note}：消息 {stats['before_msgs']}→{stats['after_msgs']} 条，"
+            if stats is None and directive:
+                new_messages, stats = compact_by_directive(
+                    self.messages, summarizer=summarizer, directive=directive,
+                )
+            if stats is None:
+                return "轮数不足以压缩（中段为空），本次未压缩。"
+            self.messages = new_messages
+            note = f"（按要求：{directive}）" if directive else ""
+            return (
+                f"已压缩{note}：消息 {stats['before_msgs']}→{stats['after_msgs']} 条，"
                 f"压掉 {stats['compacted_turns']} 轮，保留最近 {stats['kept_recent_turns']} 轮，"
-                f"摘要 {stats['summary_chars']} 字符。")
+                f"摘要 {stats['summary_chars']} 字符。"
+            )
+        finally:
+            self._run_lock.release()
 
     def _maybe_compact(self, usage: dict) -> None:
         """用本轮真实 usage 判断上下文规模，超阈值就压缩 self.messages。
@@ -617,7 +999,12 @@ class Agent:
 #       —— 干活工具（read/run/write）导 tools 就注册；这个「关于 Agent 的工具」导 agent 才注册。
 #       语义上正确：不 import agent，就没有「派生 agent」的能力。
 @tool({"task": "交给子 agent 独立完成的子任务描述，要自包含（说清目标、涉及哪些文件/命令）"})
-def spawn_subagent(task: str) -> str:
+def spawn_subagent(
+    task: str,
+    _model: str | None = None,
+    _max_tokens: int | None = None,
+    _parent_trace: str | None = None,
+) -> ToolOutput:
     """派生一个独立的子 agent 去完成一个子任务，只返回它的最终结论（上下文隔离）。
 
     什么时候用：当一个子任务需要读很多文件/多步探索，但你只关心它的**结论**时。
@@ -629,10 +1016,24 @@ def spawn_subagent(task: str) -> str:
     # check_command=None：验证门是主任务概念，子 agent 不该继承（否则回退读环境变量 CONTEXTFORGE_
     # CHECK_COMMAND，被无关检查命令反复打回、撞 max_iterations 返回垃圾结论）。
     sub = Agent(
+        model=_model,
         tools=subagent_tool_schemas(),
         max_iterations=15,
+        max_tokens=_max_tokens,
         check_command=None,
+        compact_executor="self",
+        trace_metadata={
+            "role": "spawned_subagent",
+            "parent_trace": _parent_trace,
+        },
     )
-    result = sub.run(task)
-    # 只回传最终结论。子 agent 的完整历史（sub.messages）留在它自己那里，不回灌主 agent。
-    return f"[子 agent 完成] {result}"
+    detail = sub.run_detailed(task)
+    content = detail.output or detail.error or "子 Agent 未返回结果"
+    trace_ref = detail.trace_ref
+    if detail.status == "succeeded":
+        return tool_success(
+            f"[子 agent 完成] {content}", usage=detail.usage, trace_ref=trace_ref
+        )
+    return tool_error(
+        f"[子 agent {detail.status}] {content}", usage=detail.usage, trace_ref=trace_ref
+    )
