@@ -81,6 +81,8 @@
   把其余历史按你的要求压一次；裸 `/compact` 在对话太短时仍不压。
   `/check [命令]` 设本会话验证门检查命令（如 `/check py -m pytest -q`）——声称完成时强制跑、
   失败打回；空 `/check` 查看当前，`/check off` 清除。reset 会一并清掉，回到环境变量默认。
+  `/team <目标>` 启动一次独立的只读多 Agent 协作 Demo：Coordinator 结构化拆分 → 2～4 个 Worker
+  有界并行 → Reviewer 回读证据审查 → 最多一次定向补充 → 独立 Aggregator 汇总；不复用普通会话历史。
 - 运行 `tests/` 下的手动演示脚本：`py tests/<脚本名>.py`（脚本内部已把 `src/` 插入
   `sys.path`，可直接跑，无需切目录）。
 - 冒烟测试（验证 API 通路）：`py tests/00_smoke_test.py`
@@ -97,8 +99,9 @@
   src/
     contextforge/
       __init__.py       # 包标记
-      agent.py          # 核心 TAOR loop + spawn_subagent（派生子 agent 的工具，需 Agent 故放这层）
-      tools.py          # 工具注册表 + 内置工具（read_file / run_command / write_file）
+      agent.py          # 核心 TAOR loop + spawn_subagent + 结构化 AgentRunResult
+      collaboration.py  # Coordinator → 并行 Workers → Reviewer 多 Agent 协作 Demo
+      tools.py          # 全局工具注册表 + 实例级 LocalTool + 内置工具
       context.py        # 上下文/压缩（P3：真实 usage 判规模，超阈值压中段）
       harness.py        # 权限拦截 + 死循环检测 + 验证门（P4：三根柱子）
       cli.py             # CLI 入口（原 main.py，T3 标准包布局后改名）

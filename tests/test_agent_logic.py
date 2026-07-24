@@ -646,7 +646,6 @@ def _drive_one_round(agent, blocks, monkeypatch, probe):
     """驱动 agent 的真实 _run_loop 跑一轮：第 1 轮请求 blocks 里的工具，第 2 轮 end_turn 收尾。
     probe 是一个 (name)->None 的记录回调，包在 execute_tool 外层，用来观测并发。"""
     import unittest.mock as mock
-    import contextforge.agent as agent_mod
     monkeypatch.setenv("CONTEXTFORGE_TRACE", "off")
     monkeypatch.setenv("CONTEXTFORGE_LOG", "off")
     n = {"i": 0}
@@ -657,12 +656,12 @@ def _drive_one_round(agent, blocks, monkeypatch, probe):
             return _FakeResp(blocks, "tool_use")
         return _FakeResp([_FakeTUBlock("text", text="完成。")], "end_turn")
 
-    real_execute = agent_mod.execute_tool
+    real_execute = agent._execute_tool
 
-    def probing_execute(name, tool_input, read_files=None):
-        return probe(name, lambda: real_execute(name, tool_input, read_files=read_files))
+    def probing_execute(name, tool_input):
+        return probe(name, lambda: real_execute(name, tool_input))
 
-    monkeypatch.setattr(agent_mod, "execute_tool", probing_execute)
+    monkeypatch.setattr(agent, "_execute_tool", probing_execute)
     with mock.patch.object(agent.client.messages, "create", side_effect=fake_create):
         agent.run("一轮多工具")
 

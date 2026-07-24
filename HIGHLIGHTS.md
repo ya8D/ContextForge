@@ -26,6 +26,18 @@
 - **循环 import 是「东西放错层」的信号**：`spawn_subagent` 需要 Agent，故定义在 agent.py 而非 tools.py——
   延迟 import 只治标，挪到依赖正确的层才根治。
 
+## 多 Agent 协作：模型做语义工作，代码控制协作边界
+
+- **不是把 `spawn_subagent` 多调几次**：LLM Coordinator 用实例级 `submit_plan` 交结构化计划；代码校验
+  2～4 个任务并有界并行启动独立 Worker；LLM Reviewer 再回读文件抽查证据。→ [collaboration.py](./src/contextforge/collaboration.py)
+- **fan-out / fan-in 之间只传结构化报告**：Worker 不看兄弟历史，只交 `WorkerReport`；Reviewer 可精确点名
+  返工 Worker，代码强制最多补一次；最终由一个全新的无工具 Aggregator 只根据业务 DTO 汇总，控制流不由模型自由循环。
+- **只读不是提示词约定**：每个角色的工具菜单按白名单生成，Agent 执行层还会硬拒绝菜单外工具；
+  `submit_plan/report/review` 是实例级 `LocalTool`，并行 Agent 不会在全局注册表里互相覆盖 handler。
+- **team trace 保存业务交接 + 运行索引，不复制对话上下文**：`team.json` 记录计划、Worker/Reviewer 结构化报告，
+  并为每次角色运行记录 attempt、耗时、usage 和 `trace_ref`；逐轮 messages 仍只存在各 Agent 自己的 trace 中。
+  团队累计 token 含主调用、压缩与子 Agent 回传的 usage，各参与者分账同时可见。
+
 ## 上下文压缩：本地重写，可客制化
 
 - **压缩 = 在本地重写 messages，不是截断 API**：把中段多轮原文换成一条前情摘要，下轮发出去就短了，
