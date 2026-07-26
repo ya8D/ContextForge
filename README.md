@@ -14,7 +14,7 @@
 
 | 阶段 | 能力 | 核心文件 |
 |---|---|---|
-| **P1 裸 TAOR 循环** | agent 的本质：Think → Act → Observe → Repeat（带工具的 while 循环） | `agent.py` |
+| **P1 裸 Agent Loop（TAOR）** | agent 的本质：Think → Act → Observe → Repeat（带工具的 while 循环） | `agent.py` |
 | **P2 多工具 + 并行 + 回喂截断** | `@tool` 装饰器自动生成 schema；一轮多工具并行执行；先读再改约束 | `tools.py` |
 | **P3 上下文压缩** | 用真实 usage 判上下文规模，超阈值把中段历史压成摘要（保头/压中段/保尾） | `context.py` |
 | **P4 Harness 三根柱子** | 权限拦截（危险命令/路径遍历）、死循环检测、验证门（防假完成） | `harness.py` |
@@ -23,12 +23,14 @@
 
 ## 关键设计原则
 
-- **TAOR**：agent 主循环 = Think（调 LLM 决策）→ Act（执行工具）→ Observe（回喂结果）→ Repeat。
+- **Agent Loop（TAOR）**：业界交流称 Agent Loop；本项目按 Think（调 LLM 决策）→ Act（执行工具）→
+  Observe（回喂结果）→ Repeat 将四阶段简称为 TAOR。它与 ReAct（Reasoning + Acting）思想同源，
+  但这里强调的是 Harness 真正执行的循环结构，而非把二者当成完全相同的术语。
 - **每轮都发完整历史**：API 无状态，KV Cache 让重发的部分便宜（`input + cache_read + cache_write` = 真实发出总量）。
 - **用代码强制，不靠模型自律**：harness 约束（权限、循环、验证）都卡在「模型请求 → 真正执行」之间。
 - **决策交给模型，执行和约束留给代码**：单个子 agent 何时派由模型判断；团队协作中的并发、协议校验和
   最多一次定向补充由代码控制，避免模型自己决定控制流。
-- **可观测**：TAOR 每轮打印 Think / Act / Observe，并把 in/out 落盘到 `traces/`；团队另有 `team.json`
+- **可观测**：Agent Loop（TAOR）每轮打印 Think / Act / Observe，并把 in/out 落盘到 `traces/`；团队另有 `team.json`
   保存结构化业务交接，并以角色、attempt、耗时、usage 和 `trace_ref` 串起各 Agent 的逐轮 trace（均已 gitignore）。
 
 > 📌 想看这个项目**哪里特别、为什么这么设计**（都是实地验证过/踩过的亮点），见 [HIGHLIGHTS.md](./HIGHLIGHTS.md)。
@@ -38,7 +40,7 @@
 ```
 pyproject.toml # console_scripts 入口（contextforge / cf 命令）+ src 布局声明
 src/contextforge/
-  agent.py     # 核心 TAOR 循环 + spawn_subagent + 结构化 AgentRunResult
+  agent.py     # 核心 Agent Loop（TAOR）+ spawn_subagent + 结构化 AgentRunResult
   collaboration.py # Coordinator → 并行 Workers → Reviewer 协作控制面
   tools.py     # 全局 @tool + 实例级 LocalTool + 基础工具
   context.py   # 上下文压缩（P3）

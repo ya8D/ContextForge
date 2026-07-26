@@ -42,7 +42,7 @@
 
 | 变量 | 取值 | 默认 | 作用 |
 |---|---|---|---|
-| `CONTEXTFORGE_LOG` | `off` / `normal` / `debug` | `normal` | 控**屏幕**输出：`off` 只出最终答案 + 权限拦截/死循环/验证门/护栏这类错误；`normal` 是现在的样子（TAOR 每轮 Think/Act/Observe）；`debug` 再加逐轮上下文规模等细节。 |
+| `CONTEXTFORGE_LOG` | `off` / `normal` / `debug` | `normal` | 控**屏幕**输出：`off` 只出最终答案 + 权限拦截/死循环/验证门/护栏这类错误；`normal` 是现在的样子（Agent Loop 每轮 Think/Act/Observe）；`debug` 再加逐轮上下文规模等细节。 |
 | `CONTEXTFORGE_TRACE` | `on` / `off` | `on` | 独立控 `traces/` 落盘。可以「屏幕安静但文件还留着」，反之亦可。 |
 
 本地怎么设置：
@@ -101,7 +101,7 @@
   src/
     contextforge/
       __init__.py       # 包标记
-      agent.py          # 核心 TAOR loop + spawn_subagent + 结构化 AgentRunResult
+      agent.py          # 核心 Agent Loop（TAOR）+ spawn_subagent + 结构化 AgentRunResult
       collaboration.py  # Coordinator → 并行 Workers → Reviewer 多 Agent 协作 Demo
       tools.py          # 全局工具注册表 + 实例级 LocalTool + 内置工具
       context.py        # 上下文/压缩（P3：真实 usage 判规模，超阈值压中段）
@@ -117,6 +117,8 @@
 
 - 面向学习：关键处写清「为什么这么做」的中文注释，宁可啰嗦。
 - 与教材对照：实现某机制时，注释里标注对应 `agent_learning` 章节。
-- **术语统一**：agent 主循环一律叫 **TAOR**（Think → Act → Observe → Repeat）。
-- **可观测**：TAOR 循环内置 trace/log，每轮打印 Think / Act / Observe，让循环透明可见
+- **术语统一**：对外/架构交流称 **Agent Loop**；首次出现写作 **Agent Loop（TAOR）**，其中 TAOR =
+  Think → Act → Observe → Repeat，是本项目的教学分阶段名称。ReAct（Reasoning + Acting）与其思想同源，
+  但不作为完全等价术语；不要写成易与前端框架混淆的 `React`。
+- **可观测**：Agent Loop（TAOR）内置 trace/log，每轮打印 Think / Act / Observe，让循环透明可见
   （对照 agent_learning 第 18.5 节 可观测性）。测试统一放 `tests/`。

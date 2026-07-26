@@ -1,14 +1,16 @@
 """
-agent.py —— 核心 TAOR 循环（Think → Act → Observe → Repeat）
+agent.py —— 核心 Agent Loop（TAOR：Think → Act → Observe → Repeat）
 
-这是整个项目的心脏。一个 agent 的本质，就是「一个带工具的 while 循环」：
+这是整个项目的心脏。一个 agent 的本质，就是「一个带工具的 while 循环」。业界通常称
+Agent Loop；TAOR 是本项目对四个循环阶段的教学简称。它与 ReAct（Reasoning + Acting）
+思想同源，但这里强调的是 Harness 真正执行的循环结构：
   Think   : 调 LLM，模型决定「说话」还是「调工具」
   Act     : 如果模型要调工具，我们的代码去执行
   Observe : 把工具结果包成 tool_result，追加进历史
   Repeat  : 回到 Think，直到模型不再要工具（stop_reason == end_turn）
 
 对照 agent_learning：第 1.3 节（OTA 循环）、第 3.2 节（Function Calling）、
-第 15.2 节（Claude Code 的 TAOR）。
+第 15.2 节（Claude Code 的 Agent Loop / TAOR）。
 
 Anthropic 消息形态（与书里 OpenAI 版的关键差异，见 CLAUDE.md 对照表）：
 - 模型请求工具 → content 里的 tool_use block（含 id / name / input）
@@ -80,7 +82,7 @@ _TRACES_ROOT = _HERE / "traces"
 _MAX_RESULT_CHARS = 50000
 
 
-# ── 轻量 trace 工具：让 TAOR 每一步透明可见（对照第 18.5 节 可观测性）──
+# ── 轻量 trace 工具：让 Agent Loop（TAOR）的每一步透明可见（对照第 18.5 节 可观测性）──
 # 用带颜色/图标的前缀区分阶段，肉眼一眼就能跟上循环在做什么。
 # T1：CONTEXTFORGE_LOG 控屏幕分级（off/normal/debug，默认 normal）；level="error" 的调用点
 # （权限拦截/死循环/验证门/护栏）即使 off 档也照打——用户仍需第一时间看到问题。
@@ -234,7 +236,7 @@ def _truncate_for_feedback(result: str) -> str:
 
 
 class Agent:
-    """最小 TAOR agent：一个循环 + 一组工具 + 一段对话历史。"""
+    """最小 Agent Loop（TAOR）实现：一个循环 + 一组工具 + 一段对话历史。"""
 
     # 进程内单调递增的实例序号，给 trace 目录做**唯一后缀**。
     # 为什么不用 id(self)：短生命周期的 Agent 建完即被回收，id() 会被下一个实例复用 →
@@ -325,7 +327,7 @@ class Agent:
         else:
             self.check_command = check_command or None
         self.validation_gate = ValidationGate(check_command=self.check_command)
-        # 对话历史：TAOR 每一轮的「所见所想所做」都累积在这里。
+        # 对话历史：Agent Loop（TAOR）每一轮的「所见所想所做」都累积在这里。
         self.messages: list[dict] = []
         # 「本会话已读文件」集合——「先读再改」约束的状态。**每个 Agent 实例各一套**（含子 agent），
         # 由 execute_tool 带外注入给 read_file/write_file。放实例而非模块全局，才能让 reset（新建实例）
@@ -394,7 +396,7 @@ class Agent:
             raise
 
     def run_detailed(self, task: str) -> AgentRunResult:
-        """执行一次 TAOR，并原子快照控制面结果（对照 agent_learning 第 16.4 节）。"""
+        """执行一次 Agent Loop（TAOR），并原子快照控制面结果（对照 agent_learning 第 16.4 节）。"""
         started = time.perf_counter()
         if not self._run_lock.acquire(blocking=False):
             return AgentRunResult(
@@ -440,7 +442,7 @@ class Agent:
             self._run_lock.release()
 
     def tool_calls_snapshot(self) -> list[dict]:
-        """返回本次运行工具记录的独立快照，供证据门按路径与 TAOR 轮次核验。"""
+        """返回本次运行工具记录的独立快照，供证据门按路径与 Agent Loop（TAOR）轮次核验。"""
         return copy.deepcopy(self._last_run_tool_calls)
 
     def has_executed_tool(self, name: str, *, succeeded: bool = False) -> bool:
@@ -549,9 +551,9 @@ class Agent:
         }
 
     def _run_loop(self) -> str:
-        """TAOR 主循环本体（从 run() 抽出，便于 run() 在外层统一做失败回滚）。"""
+        """Agent Loop（TAOR）主循环本体（从 run() 抽出，便于 run() 在外层统一做失败回滚）。"""
         for i in range(1, self.max_iterations + 1):
-            _log(f"\n🔄 ===== TAOR 第 {i}/{self.max_iterations} 轮 =====", "")
+            _log(f"\n🔄 ===== Agent Loop（TAOR）第 {i}/{self.max_iterations} 轮 =====", "")
 
             # trace 关闭时不复制完整历史；多轮大文件会话里这能避免无收益的近 O(n²) 序列化。
             messages_sent = _to_serializable(self.messages) if _trace_enabled() else None
@@ -588,7 +590,7 @@ class Agent:
                 response.stop_reason,
                 response.content,
                 # Anthropic SDK 的真实 Message 一定有 model；轻量测试替身可能没有，缺失时记 None，
-                # 不能让可观测性字段反过来改变 TAOR 业务状态。
+                # 不能让可观测性字段反过来改变 Agent Loop（TAOR）的业务状态。
                 response_model=getattr(response, "model", None),
             )
 
@@ -973,7 +975,7 @@ class Agent:
         return self._summarize_via_subagent if self.compact_executor == "subagent" else self._summarize
 
     def compact_now(self, directive: str | None = None) -> str:
-        """主动压缩入口；与 TAOR 共用运行锁，不能并发改写会话历史。"""
+        """主动压缩入口；与 Agent Loop（TAOR）共用运行锁，不能并发改写会话历史。"""
         if not self._run_lock.acquire(blocking=False):
             raise RuntimeError("Agent 正在运行，不能同时压缩历史")
         try:

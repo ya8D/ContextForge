@@ -4,7 +4,7 @@ cli.py —— ContextForge 的正式 CLI 入口（原 main.py）。
 用法（`pip install -e .` 后可在任意目录直接敲 `contextforge`，或用短别名 `cf`）：
     contextforge      # 或 cf
 
-启动后进入交互循环：输入任务 → agent 跑 TAOR → 打印结果 → 继续。
+启动后进入交互循环：输入任务 → agent 跑 Agent Loop（TAOR）→ 打印结果 → 继续。
 输入 exit / quit / q 退出。
 
 说明：

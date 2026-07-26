@@ -7,8 +7,8 @@ collaboration.py —— Coordinator → Workers → Reviewer 多 Agent 协作 De
 - 第 16.4 节：Python Coordinator 掌握并发、返工上限和完成判定；
 - 第 16.5 节：plan → fan-out → review → 一次定向补充 → fan-in。
 
-LLM 负责语义拆分、只读调查、证据审查和自然语言汇总；Python 负责确定性 TAOR
-编排。刻意不做 DAG、checkpoint、长期记忆、分布式或并发写文件。
+LLM 负责语义拆分、只读调查、证据审查和自然语言汇总；Python 负责确定性
+Agent Loop（TAOR）编排。刻意不做 DAG、checkpoint、长期记忆、分布式或并发写文件。
 """
 
 import itertools
@@ -91,7 +91,7 @@ class ReviewReport:
 
 @dataclass
 class ParticipantRun:
-    """一次角色 TAOR 运行的分账与 trace 索引。"""
+    """一次角色 Agent Loop（TAOR）运行的分账与 trace 索引。"""
 
     agent_id: str
     parent_id: str | None
@@ -306,7 +306,7 @@ class _WorkerCapture:
                 missing = [item.path for item in evidence if _norm(item.path) not in reads]
                 if missing:
                     raise ValueError(
-                        "以下 evidence 文件未在更早 TAOR 轮成功读取：" + ", ".join(missing)
+                        "以下 evidence 文件未在更早 Agent Loop（TAOR）轮次成功读取：" + ", ".join(missing)
                     )
                 for item in evidence:
                     line_count = reads[_norm(item.path)]
@@ -382,13 +382,13 @@ class _ReviewCapture:
                     "revise 必须包含失败 Worker：" + ", ".join(sorted(missing_failed))
                 )
 
-            # 有可核验证据时，Reviewer 必须在提交前的更早 TAOR 轮回读其中至少一个路径。
+            # 有可核验证据时，Reviewer 必须在提交前的更早 Agent Loop（TAOR）轮次回读其中至少一个路径。
             if self.evidence_paths:
                 if self.agent is None:
                     raise ValueError("Reviewer 工具尚未绑定 Agent")
                 read_paths = set(_successful_reads_before(self.agent, "submit_review"))
                 if not (read_paths & self.evidence_paths):
-                    raise ValueError("必须先在更早 TAOR 轮回读至少一个 Worker evidence 文件")
+                    raise ValueError("必须先在更早 Agent Loop（TAOR）轮次回读至少一个 Worker evidence 文件")
 
             self.report = {
                 "verdict": verdict,
@@ -631,7 +631,7 @@ class TeamCoordinator:
             local_tools=[_worker_tool(capture)],
             system_prompt=(
                 f"你是多 Agent 团队中的只读 Worker，角色是「{task.role}」。"
-                "你只处理自己的窄任务。必须先在一个 TAOR 轮调用 read_file，观察结果后再在后续轮"
+                "你只处理自己的窄任务。必须先在一个 Agent Loop（TAOR）轮次调用 read_file，观察结果后再在后续轮"
                 "调用 submit_worker_report。evidence 必须逐项提交 path、正整数 line、claim。"
                 "禁止写文件、跑命令或派生 Agent。"
             ),
@@ -773,7 +773,7 @@ class TeamCoordinator:
             local_tools=[_review_tool(capture)],
             system_prompt=(
                 "你是独立 Reviewer。检查任务覆盖、证据可定位性和报告冲突。若存在 evidence，必须先"
-                "在一个 TAOR 轮用 read_file 回读其中至少一个路径，观察结果后再在后续轮提交审查。"
+                "在一个 Agent Loop（TAOR）轮次用 read_file 回读其中至少一个路径，观察结果后再在后续轮提交审查。"
                 "失败 Worker 必须被点名 revise；只有全部充分一致才 accept。"
             ),
             trace_metadata={

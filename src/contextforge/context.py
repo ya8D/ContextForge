@@ -1,7 +1,7 @@
 """
 context.py —— 上下文管理（Memory 第一层：会话内压缩）
 
-要解决的病：TAOR 每轮都发**完整历史**（你亲手验证过的 KV Cache 结论——发出去的
+要解决的病：Agent Loop（TAOR）每轮都发**完整历史**（你亲手验证过的 KV Cache 结论——发出去的
 总量 = input + cache_read + cache_write）。历史越滚越长，迟早两件坏事：
   1. 质量塌：模型对中段内容召回率下降（"lost in the middle"）。
   2. 钱烧光：全量重发，即使命中 cache_read（~0.1x）也是持续开销。
@@ -58,7 +58,7 @@ def should_compact(usage: dict, threshold: int = COMPACT_THRESHOLD_TOKENS) -> bo
 
 
 def _split_into_turns(middle_messages: list[dict]) -> list[list[dict]]:
-    """把「中段消息」按 TAOR 的「轮」切分，保证 tool_use / tool_result 不被拆散。
+    """把「中段消息」按 Agent Loop（TAOR）的「轮次」切分，保证 tool_use / tool_result 不被拆散。
 
     为什么必须按轮切：Anthropic 要求 assistant 的 tool_use 块，和下一条 user 消息里
     配对的 tool_result 块，必须成对出现。如果压缩时把 assistant(tool_use) 留下、
@@ -192,7 +192,7 @@ def compact_messages(
     # ⚠️ 前提：messages[0] 恒为**纯文本 user 消息**（用户输入的任务，见 agent.py run() 里
     # 第一条就是 {"role":"user","content":task}）。因此 head 里不含 tool_use，保头不会产生
     # 「head 的 tool_use 失去配对 tool_result」的隐患。若哪天 messages[0] 变成 assistant(tool_use)
-    # （非常规输入），保头+压中段会孤立该 tool_use → 下一轮 API 400；但此前提由 TAOR 结构保证，
+    # （非常规输入），保头+压中段会孤立该 tool_use → 下一轮 API 400；但此前提由 Agent Loop（TAOR）结构保证，
     # 不额外加代码校验。
     head = messages[0]
     rest = messages[1:]
