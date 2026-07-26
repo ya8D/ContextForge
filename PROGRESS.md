@@ -16,7 +16,21 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
 标准包布局 → 快速启动命令 → 日志开关 → 客制化 compact → 简历前缺口补齐 →
 **项目更名 ContextForge** → 验证门用户入口 → 指令驱动压缩 → [CF] 前缀+trace 分层 →
 验证门 e2e → 学习笔记（docs/ 9 篇）→ Coordinator–Worker–Reviewer 多 Agent 协作 Demo →
-trace 同时记录请求模型与响应模型 → **统一 Agent Loop（TAOR）术语**。
+trace 同时记录请求模型与响应模型 → 统一 Agent Loop（TAOR）术语 → **team.json 时间人类可读化**。
+
+---
+
+## team.json 时间改为带时区的 ISO 8601
+
+- **定性**：可观察性改进。`ParticipantRun` 内部用 Unix `float` 计算 Worker 并行区间是正确的，但直接把
+  `1785043734.9670775` 写进 `team.json`，人工审查时无法快速判断日期、时区和先后关系。
+- **基线**：增强前 manifest 的 `started_at / finished_at` 是 JSON number；新增测试要求字符串并用
+  `datetime.fromisoformat()` 解析，在基线上稳定失败（`isinstance(float, str) == False`）。
+- **实施**：保留 `ParticipantRun` 和 `WorkerReport` 内部 float，不影响并发重叠计算；只在 manifest 序列化
+  边界转换为本地时区 ISO 8601，精确到毫秒，例如 `2026-07-26T17:20:47.932+08:00`。耗时继续用
+  `duration_seconds` 表达，避免用墙钟时间相减替代单调计时结果。
+- **验证**：专项测试确认起止时间均为带时区字符串、可解析且 start ≤ finish；全量非 e2e
+  **153 passed, 21 deselected**；`py_compile` 与 `git diff --check` 通过。
 
 ---
 

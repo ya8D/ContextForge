@@ -8,6 +8,7 @@ test_collaboration.py —— Coordinator → Workers → Reviewer 协作 Demo �
 import json
 import os
 import threading
+from datetime import datetime
 import time
 from collections import Counter
 from pathlib import Path
@@ -466,7 +467,13 @@ def test_team_manifest_links_each_agent_trace(monkeypatch, tmp_path):
     assert manifest["total_usage"] == result.total_usage
     assert all("messages" not in item for item in manifest["participant_runs"])
     assert all(item["duration_seconds"] >= 0 for item in manifest["participant_runs"])
-    assert all(item["started_at"] <= item["finished_at"] for item in manifest["participant_runs"])
+    for item in manifest["participant_runs"]:
+        assert isinstance(item["started_at"], str)
+        assert isinstance(item["finished_at"], str)
+        started = datetime.fromisoformat(item["started_at"])
+        finished = datetime.fromisoformat(item["finished_at"])
+        assert started.tzinfo is not None and finished.tzinfo is not None
+        assert started <= finished
 
 
 # ── 审查回归：通用 Agent 的结构化状态与权限边界 ───────────────
