@@ -8,6 +8,8 @@ _log（T1 日志分级）、_dump_turn（T1 trace 开关）。
 跑法：py -m pytest tests/test_agent_logic.py -v
 """
 
+import json
+
 from contextforge.agent import Agent, _MAX_RESULT_CHARS, _log, _to_serializable, _truncate_for_feedback
 
 
@@ -119,14 +121,29 @@ def test_dump_turn_skips_when_trace_off(monkeypatch, tmp_path):
     assert not (tmp_path / "turn_01.json").exists()
 
 
+def test_dump_turn_records_request_and_response_models(monkeypatch, tmp_path):
+    """trace 必须区分请求模型与服务端响应回填模型，不能把 self.model 同时冒充两者。"""
+    monkeypatch.delenv("CONTEXTFORGE_TRACE", raising=False)
+    agent = Agent(model="REQUEST_MODEL_SENTINEL")
+    agent.current_task_dir = tmp_path
+
+    agent._dump_turn(
+        1, [], {"input_tokens": 1}, "end_turn",
+        response_model="RESPONSE_MODEL_SENTINEL",
+    )
+
+    data = json.loads((tmp_path / "turn_01.json").read_text(encoding="utf-8"))
+    assert data["request_model"] == "REQUEST_MODEL_SENTINEL"
+    assert data["response_model"] == "RESPONSE_MODEL_SENTINEL"
+    assert data["request_model"] != data["response_model"]
+
+
 def test_dump_turn_records_response_content(monkeypatch, tmp_path):
     """trace 补记模型输出：本轮回复内容真的进了 turn_NN.json 的 response_content 字段。
 
     用假 content block（仿 SDK 的 TextBlock，有 model_dump()）模拟 response.content，
     不调 API。验证的正是用户发现缺失的东西：一轮 end_turn 结束时，回复文字也能落盘复盘。
     """
-    import json
-
     class FakeBlock:
         def model_dump(self):
             return {"type": "text", "text": "模型回复XYZ"}

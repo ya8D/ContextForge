@@ -53,7 +53,8 @@ CLAUDE.md      # 项目稳定约定（选型 / 语言 / 运行方式）
 ## 怎么跑
 
 > 需要 Anthropic API 凭据。本项目从环境变量读（`ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
-> `ANTHROPIC_MODEL`），放在本地 `.env`（**已 gitignore，绝不进库**）。
+> `ANTHROPIC_MODEL`），放在本地 `.env`（**已 gitignore，绝不进库**）。这三项以项目 `.env` 为准，
+> 会覆盖 IDE/父进程注入的同名值；`CONTEXTFORGE_LOG` 等临时运行开关不受影响。
 
 ```bash
 py -m pip install -r requirements.txt      # 装依赖（anthropic + pytest 等）

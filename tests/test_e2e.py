@@ -8,10 +8,43 @@ test_e2e.py —— 端到端测试：真调 Anthropic API，验证完整 TAOR �
 但「零件组装成 TAOR 循环、模型真的会调工具」只能靠真跑一次来验证。
 """
 
+import json
+
 import pytest
 
 from contextforge.agent import Agent
 from contextforge.collaboration import TeamCoordinator
+
+
+@pytest.mark.e2e
+def test_trace_records_server_reported_response_model(monkeypatch, tmp_path):
+    """真实 API：response.model 必须原样落盘，并与请求侧模型分字段保存。
+
+    测试不假定代理一定返回请求别名或真实上游型号，只验证 SDK 真实响应对象的 model
+    被完整传入 trace；请求/响应取值来源不同由纯逻辑 sentinel 测试负责钉死。
+    """
+    monkeypatch.setenv("CONTEXTFORGE_TRACE", "on")
+    monkeypatch.setenv("CONTEXTFORGE_LOG", "off")
+    agent = Agent(tools=[], max_iterations=2, check_command=None)
+    agent.trace_dir = tmp_path / "trace"
+    agent.trace_dir.mkdir(parents=True, exist_ok=True)
+    real_create = agent.client.messages.create
+    served = {}
+
+    def capture_response(**kwargs):
+        response = real_create(**kwargs)
+        served["model"] = response.model
+        return response
+
+    monkeypatch.setattr(agent.client.messages, "create", capture_response)
+    result = agent.run_detailed("只回答 pong，不要解释或调用工具。")
+    trace_path = agent.current_task_dir / "turn_01.json"
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+
+    assert result.status == "succeeded", result.error
+    assert isinstance(served["model"], str) and served["model"]
+    assert trace["request_model"] == agent.model
+    assert trace["response_model"] == served["model"]
 
 
 @pytest.mark.e2e

@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 import anthropic
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 from contextforge.context import (
     COMPACT_THRESHOLD_TOKENS,
@@ -50,12 +50,25 @@ from contextforge.tools import (
     tool_success,
 )
 
-# 加载项目根的 .env（代理凭据：ANTHROPIC_AUTH_TOKEN / BASE_URL / MODEL）。
-# 这套凭据由 VSCode 扩展注入其子进程，普通终端拿不到，故落到本地 .env。
-# 本文件位于 src/contextforge/ 下，.env 和 traces/ 实际在项目根，
-# 故要上跳两级（src/contextforge/ → src/ → 项目根），而非本文件所在目录。
+# 加载项目根的 .env。本项目把它视为 Anthropic 连接配置的明确本地选择：VS Code / Claude Code
+# 可能给子进程注入同名变量，但 ANTHROPIC_MODEL / BASE_URL / AUTH_TOKEN 仍以项目 .env 为准。
+# 只覆盖这三项，避免 CONTEXTFORGE_LOG=debug 这类临时运行开关也被 .env 反向盖掉。
+# 本文件位于 src/contextforge/ 下，.env 和 traces/ 实际在项目根，故上跳两级定位项目根。
 _HERE = Path(os.path.abspath(__file__)).parent.parent.parent
-load_dotenv(_HERE / ".env")
+_DOTENV_PATH = _HERE / ".env"
+
+
+def _load_project_dotenv(path: Path) -> None:
+    """加载项目配置，并让 .env 中的 Anthropic 连接三项覆盖父进程注入值。"""
+    load_dotenv(path)
+    dotenv_config = dotenv_values(path)
+    for key in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"):
+        value = dotenv_config.get(key)
+        if value is not None:
+            os.environ[key] = value
+
+
+_load_project_dotenv(_DOTENV_PATH)
 
 # trace 落盘根目录（已在 .gitignore 中忽略）。
 _TRACES_ROOT = _HERE / "traces"
@@ -566,8 +579,18 @@ class Agent:
             self._last_stop_reason = response.stop_reason
             _merge_usage(self._last_run_usage, usage)
 
-            # 落盘：这一轮的完整 in（messages_sent）+ 本轮模型输出（response.content）+ usage。
-            self._dump_turn(i, messages_sent, usage, response.stop_reason, response.content)
+            # 落盘：同时记录请求侧 model 与服务端回填的 response.model。使用本地代理时，
+            # 响应字段仍属于代理可改写的信任边界，但它是零成本核验“服务端自报模型”的直接证据。
+            self._dump_turn(
+                i,
+                messages_sent,
+                usage,
+                response.stop_reason,
+                response.content,
+                # Anthropic SDK 的真实 Message 一定有 model；轻量测试替身可能没有，缺失时记 None，
+                # 不能让可观测性字段反过来改变 TAOR 业务状态。
+                response_model=getattr(response, "model", None),
+            )
 
             # 打印一行缓存对比汇总，一眼看清「input 只是新增量，其余命中缓存」。
             cr = usage["cache_read_input_tokens"]
@@ -831,9 +854,21 @@ class Agent:
         _log("\n⛔ [护栏]", f"达到最大轮数 {self.max_iterations}，强制停止。", level="error")
         return "[未完成] 达到最大迭代轮数。"
 
-    def _dump_turn(self, turn: int, messages_sent, usage, stop_reason,
-                   response_content=None) -> None:
-        """把这一轮的完整 in/out 落盘成一个 JSON 文件，供实地调查。
+    def _dump_turn(
+        self,
+        turn: int,
+        messages_sent,
+        usage,
+        stop_reason,
+        response_content=None,
+        *,
+        response_model: str | None = None,
+    ) -> None:
+        """把这一轮的完整 in/out 和请求/响应模型身份落盘，供实地调查。
+
+        ``request_model`` 来自本地请求配置 ``self.model``；``response_model`` 来自 Anthropic
+        Message 响应对象的 ``response.model``。二者分开保存，才能发现代理别名解析、路由或
+        服务端回填结果与请求不一致。走本地代理时，response_model 仍需信任代理没有改写。
 
         response_content：本轮模型的输出（response.content，SDK content block 列表）。
         为什么要它：messages_sent 是"调 LLM 之前"的快照，只含发出去的输入；模型回复要到
@@ -847,7 +882,10 @@ class Agent:
         path = self.current_task_dir / f"turn_{turn:02d}.json"
         payload = {
             "turn": turn,
+            # model 保留为兼容别名；新代码应读取语义明确的 request_model / response_model。
             "model": self.model,
+            "request_model": self.model,
+            "response_model": response_model,
             "max_tokens": self.max_tokens,
             "system": self.system_prompt,
             "tools": _to_serializable(self.tool_schemas),

@@ -15,7 +15,35 @@
 Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 import →
 标准包布局 → 快速启动命令 → 日志开关 → 客制化 compact → 简历前缺口补齐 →
 **项目更名 ContextForge** → 验证门用户入口 → 指令驱动压缩 → [CF] 前缀+trace 分层 →
-验证门 e2e → 学习笔记（docs/ 9 篇）→ **Coordinator–Worker–Reviewer 多 Agent 协作 Demo**。
+验证门 e2e → 学习笔记（docs/ 9 篇）→ Coordinator–Worker–Reviewer 多 Agent 协作 Demo →
+**trace 同时记录请求模型与响应模型**。
+
+---
+
+## Trace 同时记录请求模型与服务端响应模型
+
+- **定性**：可观察性增强。旧 trace 的 `model` 只来自 `self.model`，即客户端发出的请求值；代码已经拿到
+  Anthropic SDK `Message` 响应，却没有保存服务端回填的 `response.model`，因此无法事后比较请求别名与
+  实际响应自报模型。
+- **真实基线**：用真实 API 调 `Agent.run("只回答 pong")`，在调用点捕获到
+  `response.model=gpt-5.6-sol[1m]`；同轮 trace 只有 `model=gpt-5.6-sol[1m]`，明确缺少
+  `response_model`。这证明响应字段真实存在、但落盘链路漏记，不是根据假 client 猜测。
+- **实施**：`_run_loop()` 将 `response.model` 传给 `_dump_turn()`；每轮 trace 新增语义明确的
+  `request_model`（请求侧 `self.model`）和 `response_model`（响应侧 `Message.model`）。原 `model`
+  保留为请求侧兼容别名，避免旧分析脚本突然失效。轻量测试替身没有 `model` 时落 `null`，可观察性不能反过来
+  改变 TAOR 业务状态。
+- **配置优先级补正**：真实基线意外发现父进程注入了 `ANTHROPIC_MODEL=gpt-5.6-sol[1m]`，而项目 `.env`
+  明确配置 `claude-opus-4.8[1m]`；`load_dotenv()` 默认不覆盖，导致前者胜出。现把项目 `.env` 视为本项目
+  Anthropic 连接配置的明确选择，仅让其中的 `AUTH_TOKEN / BASE_URL / MODEL` 覆盖父进程同名值；
+  `CONTEXTFORGE_LOG=debug` 等临时开关仍由当前进程优先。纯逻辑测试验证模型会覆盖、日志开关不会覆盖。
+- **信任边界**：当前请求经过 `ANTHROPIC_BASE_URL` 本地代理，因此 `response_model` 证明的是“代理/服务端
+  返回对象自报的模型”，不能在密码学意义上证明上游实际推理模型；本项目明确接受并信任该开源代理。
+- **测试有效性**：新增纯逻辑测试使用不同的请求/响应 sentinel，防止实现偷懒把 `self.model` 同时写进两栏；
+  在未实现基线上稳定 `TypeError`（`_dump_turn` 不接受 `response_model`），恢复实现后通过。新增真实 API e2e
+  捕获真实 `Message.model` 并断言它与 trace `response_model` 逐字一致。
+- **验证**：真实 API e2e **1 passed**；它先暴露父进程实际覆盖成 `gpt-5.6-sol[1m]`，修正 `.env`
+  优先级后同一真实调用得到 `request_model == response_model == claude-opus-4.8[1m]`。全量非 e2e
+  **153 passed, 21 deselected**；`py_compile` 与 `git diff --check` 通过。
 
 ---
 
