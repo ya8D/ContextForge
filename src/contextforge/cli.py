@@ -27,7 +27,6 @@ def main() -> int:
     print("  /compact [要求] —— 手动压缩历史（可跟一段话指定保留/删除什么）")
     print("  /check [命令] —— 设验证门检查命令（如 /check py -m pytest -q）；空=查看，off=清除")
     print("  /team <目标> —— 启动 Coordinator → 并行 Workers → Reviewer 只读协作 Demo")
-    print(f"  模型：{agent.model}")
     print(f"  可用工具（发给模型的菜单，共 {len(TOOL_SCHEMAS)} 个）：")
     for t in TOOL_SCHEMAS:
         print(f"    · {t['name']}：{t['description']}")
