@@ -51,7 +51,8 @@
 ## 可观测性 & 工程细节
 
 - **trace 输入侧 / 输出侧各记各的**：`messages_sent` 是调 LLM 前的输入快照，`response_content` 是本轮
-  模型输出，分开存互不污染——单看输入侧曾复盘不了模型回复。→ [agent.py `_dump_turn`](./src/contextforge/agent.py)
+  模型输出，分开存互不污染；模型身份也分成请求侧 `request_model` 与响应侧 `response_model`，可核对代理/
+  服务端自报路由结果（经本地代理时仍以信任代理为前提）。→ [agent.py `_dump_turn`](./src/contextforge/agent.py)
 - **日志分级用字符串枚举**：`CONTEXTFORGE_LOG=off/normal/debug` 比 `0/1/2` 自解释，且与 `CONTEXTFORGE_TRACE=on/off`
   统一；`error` 级即使 `off` 档也照打。屏幕分级和落盘是两个独立开关。→ [agent.py `_log`](./src/contextforge/agent.py)
 - **配置读取一律「显式 > 环境变量 > 默认」**：`model` 读 `ANTHROPIC_MODEL`、`compact_directive` 读
