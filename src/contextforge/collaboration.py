@@ -127,6 +127,11 @@ def _empty_usage() -> dict[str, int]:
     return {key: 0 for key in _USAGE_KEYS}
 
 
+def _format_timestamp(timestamp: float) -> str:
+    """把内部 Unix 时间转换为带本地时区偏移的 ISO 8601，供 JSON 人工阅读。"""
+    return datetime.fromtimestamp(timestamp).astimezone().isoformat(timespec="milliseconds")
+
+
 def sum_usage(usages: Iterable[dict[str, int]]) -> dict[str, int]:
     """聚合所有角色/尝试的四项 usage；缺失或 None 均按 0。"""
     total = _empty_usage()
@@ -872,8 +877,9 @@ class TeamCoordinator:
                     "attempt": run.attempt,
                     "phase": run.phase,
                     "status": run.status,
-                    "started_at": run.started_at,
-                    "finished_at": run.finished_at,
+                    # 内部仍保留 float 供并发区间计算；manifest 边界转成可读、带时区的 ISO 8601。
+                    "started_at": _format_timestamp(run.started_at),
+                    "finished_at": _format_timestamp(run.finished_at),
                     "duration_seconds": run.duration_seconds,
                     "usage": run.usage,
                     "trace_ref": run.trace_ref,
