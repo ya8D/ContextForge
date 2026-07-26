@@ -44,7 +44,7 @@ sub  = Agent()
 sub.messages      = [...]     # 另一个 list，和上面毫无关系
 ```
 
-主 agent 调 `spawn_subagent`，子 agent 在自己的 `sub.messages` 里吭哧跑完整个 TAOR 循环，中间过程
+主 agent 调 `spawn_subagent`，子 agent 在自己的 `sub.messages` 里吭哧跑完整个 Agent Loop（TAOR），中间过程
 全在子的 list 里；结束只 `return` 一个字符串。子的完整历史 `sub.messages` **压根没有回灌**主 agent。
 隔离不是"实现"出来的，是"两个对象各有各的 list"这个再普通不过的事实**本来就成立**的。
 

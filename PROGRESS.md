@@ -11,12 +11,27 @@
 
 ## 演进时间线（从地基到最新，一眼看全貌）
 
-环境准备 → 裸 TAOR 循环 → 多工具/并行/截断/write_file → 自动化测试 → 上下文压缩 →
+环境准备 → 裸 Agent Loop（TAOR） → 多工具/并行/截断/write_file → 自动化测试 → 上下文压缩 →
 Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 import →
 标准包布局 → 快速启动命令 → 日志开关 → 客制化 compact → 简历前缺口补齐 →
 **项目更名 ContextForge** → 验证门用户入口 → 指令驱动压缩 → [CF] 前缀+trace 分层 →
 验证门 e2e → 学习笔记（docs/ 9 篇）→ Coordinator–Worker–Reviewer 多 Agent 协作 Demo →
-**trace 同时记录请求模型与响应模型**。
+trace 同时记录请求模型与响应模型 → **统一 Agent Loop（TAOR）术语**。
+
+---
+
+## 统一 Agent Loop（TAOR）术语
+
+- **动机**：单独写 `TAOR` 有利于学习四阶段，却不是面试和业界交流中最常见的架构名称；单独写 `ReAct`
+  又会把“推理 + 行动”范式与项目实际的 Harness 循环结构混为一谈，还可能被误读为前端 `React`。
+- **统一规则**：对外与架构描述优先称 **Agent Loop**；首次出现写 **Agent Loop（TAOR）**，并说明
+  TAOR = Think → Act → Observe → Repeat，是本项目教学分阶段名称；ReAct（Reasoning + Acting）只说明
+  思想同源，不作为完全等价术语。
+- **范围**：同步更新项目宪法、README、HIGHLIGHTS、核心源码注释/docstring、协作角色提示、错误信息、
+  学习笔记、测试说明和历史开发日志；运行时轮次日志也改成 `Agent Loop（TAOR）第 N/M 轮`。
+- **行为边界**：仅统一术语，不修改 `_run_loop()` 控制流、消息协议、测试断言逻辑或 API 请求形态。
+- **验证**：术语扫描覆盖根文档、`docs/`、`src/`、`tests/` 共 34 个文件，旧的孤立 TAOR 表述
+  已清零；`py_compile` 与 `git diff --check` 通过；全量非 e2e **153 passed, 21 deselected**。
 
 ---
 
@@ -31,7 +46,7 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
 - **实施**：`_run_loop()` 将 `response.model` 传给 `_dump_turn()`；每轮 trace 新增语义明确的
   `request_model`（请求侧 `self.model`）和 `response_model`（响应侧 `Message.model`）。原 `model`
   保留为请求侧兼容别名，避免旧分析脚本突然失效。轻量测试替身没有 `model` 时落 `null`，可观察性不能反过来
-  改变 TAOR 业务状态。
+  改变 Agent Loop（TAOR）的业务状态。
 - **配置优先级补正**：真实基线意外发现父进程注入了 `ANTHROPIC_MODEL=gpt-5.6-sol[1m]`，而项目 `.env`
   明确配置 `claude-opus-4.8[1m]`；`load_dotenv()` 默认不覆盖，导致前者胜出。现把项目 `.env` 视为本项目
   Anthropic 连接配置的明确选择，仅让其中的 `AUTH_TOKEN / BASE_URL / MODEL` 覆盖父进程同名值；
@@ -67,7 +82,7 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
   实际工具菜单硬拒绝越权调用；Worker/Reviewer 只获 `read_file`，不能写文件、跑命令或派生 Agent。
 - **协作闭环**：Coordinator 通过嵌套 schema 提交 2～4 个 `WorkerTask`；每个 Worker 使用独立
   messages/read_files/trace，在 `ThreadPoolExecutor` 中有界并行。Worker 必须提交结构化 `Evidence(path,
-  line, claim)`；host 验证路径确实在更早 TAOR 轮成功读取，并按当次读取行数拒绝越界行号。Reviewer 使用
+  line, claim)`；host 验证路径确实在更早 Agent Loop（TAOR）轮次成功读取，并按当次读取行数拒绝越界行号。Reviewer 使用
   全新只读 Agent，必须在更早一轮回读至少一个 evidence 路径，失败 Worker 不得被 accept。
 - **一次定向补充**：Reviewer 只能点名需要补充的 Worker；代码只重跑这些任务一次，并把原任务、上一版
   报告和反馈一并交给它们。补充证据按 path+line 增量合并；即使补充失败，首轮已核实证据仍保留。
@@ -89,7 +104,7 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
   路径并 accept、全新 Aggregator 正确输出两条路径→sentinel 关系；该 e2e **1 passed in 44.89s**。
   这取代严格证据门改写前的旧版 e2e 结果。另以 `CONTEXTFORGE_LOG=off` 手动驱动 CLI `/team` 读取
   README/TODO 第一行：最终 `succeeded + accept`，两条文件:行号事实正确，team.json 可打开且参与者耗时、
-  usage、trace_ref 齐全；屏幕只保留最终答案与团队摘要，没有 TAOR 过程噪声。
+  usage、trace_ref 齐全；屏幕只保留最终答案与团队摘要，没有 Agent Loop（TAOR）过程噪声。
 
 ---
 
@@ -357,7 +372,7 @@ compact_by_directive 保头假设被破坏（各路径 messages[0] 恒纯文本 
 
 ## 验证门用户入口（CONTEXTFORGE_CHECK_COMMAND + /check · 承「让机制有变成用户能用」）
 
-- **起因**：更名后重读验证门，发现它和缺口补齐那批是同类漏——`ValidationGate` 逻辑早已接入 TAOR
+- **起因**：更名后重读验证门，发现它和缺口补齐那批是同类漏——`ValidationGate` 逻辑早已接入 Agent Loop（TAOR）
   循环（声称完成→跑检查→失败打回），但 `check_command` **只有构造参数入口**，CLI 两处都是裸
   `Agent()`。结果：从 `contextforge`/`cf` 跑的用户根本配不了，验证门永远走「未配置→跳过」，形同虚设。
   compact 三兄弟（directive/threshold/executor）都补过环境入口，唯独 `check_command` 漏了。
@@ -447,7 +462,7 @@ compact_by_directive 保头假设被破坏（各路径 messages[0] 恒纯文本 
 - **验证**：① `not e2e` 70 绿（62+8，无回归）；② 手动跑：4 步任务攒 10 条历史 →
   `/compact 只保留每个命令输出…` → `已压缩（按要求：…）：消息 10→7 条`；
   ③ **子 agent 执行者手动实证**：构造 `Agent(compact_executor="subagent")`，历史里提到一个探针文件 →
-  `compact_now` → 子 agent **真的启动了自己的 TAOR 循环、真的 read_file 回读核实**，摘要里写
+  `compact_now` → 子 agent **真的启动了自己的 Agent Loop（TAOR）、真的 read_file 回读核实**，摘要里写
   "（已回读 …核实，当前仍成立）"——这正是子 agent 相对盲总结的增量价值（能核实，非凭记忆）。
 - **向后兼容**：不传任何该组参数时，`compact_directive=None` + `compact_executor="self"`，
   prompt 逐字等于 P3、执行者就是原 `_summarize`，行为与 P3 完全一致。
@@ -463,7 +478,7 @@ compact_by_directive 保头假设被破坏（各路径 messages[0] 恒纯文本 
 - **改动前先做了一次现状盘点**（Explore agent 核实）：`_log(tag, msg)` 全文件 15 处调用，
   全部只传 2 个位置参数；`tools.py`/`context.py`/`harness.py` 零 print/`_log`；`cli.py` 有
   自己独立的 11 处 `print()`（banner/提示/退出语），和 `_log` 是两套互不相干的输出——
-  本次不碰 `cli.py`，只改 `agent.py` 的 TAOR 内部输出。
+  本次不碰 `cli.py`，只改 `agent.py` 的 Agent Loop（TAOR）内部输出。
 - **`_log` 加 `level` 参数**（默认 `"normal"`）：内部每次调用都读一次 `MYAGENT_LOG`
   （不缓存，简单正确，换来测试好控制）。`level="error"` 的调用即使 `off` 档也照打；
   `level="debug"` 只在 `MYAGENT_LOG=debug` 才打；非法值兜底当 `normal` 处理，不报错。
@@ -546,7 +561,7 @@ compact_by_directive 保头假设被破坏（各路径 messages[0] 恒纯文本 
 - **关键设计——子 agent 是"一个工具"**：不需要特殊派生机制，把"派生子 agent"做成普通工具
   `spawn_subagent`。主 agent 调它就像调 read_file，工具内部 new 一个 Agent 跑完、返回结论。
 - **上下文隔离靠 `new Agent()`**：子 agent = 全新 Agent 实例，`self.messages = []` 是独立空列表，
-  和主 agent 两个对象、天然隔离。子 agent 还**自动继承**一切（TAOR/工具/压缩/harness）。
+  和主 agent 两个对象、天然隔离。子 agent 还**自动继承**一切（Agent Loop（TAOR）/工具/压缩/harness）。
 - **两个要防的坑**：① **循环导入**（spawn_subagent 需要 Agent）——见「解开循环 import」；
   ② **无限递归派生**——`subagent_tool_schemas()` 剔除 spawn_subagent，子 agent 只拿基础工具，
   只主 agent 能派生、一层不嵌套，且用更小的 `max_iterations=15`。
@@ -554,7 +569,7 @@ compact_by_directive 保头假设被破坏（各路径 messages[0] 恒纯文本 
   工具 + `subagent_tool_schemas()` 受限工具集）。
 - **测试**：`tests/test_subagent.py`（5 纯逻辑：两 Agent 的 messages 是独立对象、主全集、子受限、
   默认全集、子更小上限）；`test_tools.py` 更新 + 加受限集测试；`test_e2e.py` 新增 1 个（真派生子 agent）。
-- **e2e 实测轨迹（活教材）**：主 agent 调 spawn_subagent → 子 agent 启动**自己独立的 TAOR 循环**
+- **e2e 实测轨迹（活教材）**：主 agent 调 spawn_subagent → 子 agent 启动**自己独立的 Agent Loop（TAOR）**
   （有独立 trace 目录）→ 自己跑命令、自己完成 → 只回传一句结论。**主 agent 历史里看不到子 agent 的
   中间步骤**——上下文隔离铁证。这就是 Claude Code 里 Explore/Plan 子 agent 的同款机制。
 - **验证**：`not e2e` 53 绿；全套含 e2e 59 绿。
@@ -602,7 +617,7 @@ compact_by_directive 保头假设被破坏（各路径 messages[0] 恒纯文本 
 
 ## 上下文压缩（保头 + 压中段 + 保尾）〔原 P3〕
 
-- **要解决的病**：TAOR 每轮都发完整历史（KV Cache 已验证：发出总量 = input + cache_read +
+- **要解决的病**：Agent Loop（TAOR）每轮都发完整历史（KV Cache 已验证：发出总量 = input + cache_read +
   cache_write），历史越滚越长 → ①质量塌（"lost in the middle"）②钱烧光（全量重发）。
 - **压缩 ≠ 截断（两层不同）**：`_truncate_for_feedback` 治「单个」工具结果太大，砍单条；
   `context.py` 治「多轮累积」历史太长，调 LLM 压中段。
@@ -634,7 +649,7 @@ compact_by_directive 保头假设被破坏（各路径 messages[0] 恒纯文本 
   `test_*.py`）。
 - **测试**：`test_tools.py`（12 个，不烧钱）：装饰器 schema、read_file、write_file 先读再改约束、
   run_command 错误兜底、execute_tool 分发；`test_agent_logic.py`（5 个）：`_truncate_for_feedback`
-  截断/边界、`_to_serializable`；`test_e2e.py`（2 个，真调 API）：TAOR 跑通 + 轨迹含 tool_use；
+  截断/边界、`_to_serializable`；`test_e2e.py`（2 个，真调 API）：Agent Loop（TAOR）跑通 + 轨迹含 tool_use；
   纯问答一轮结束。
 - **跑法**：`py -m pytest -m "not e2e"`（17 绿 / 零烧钱）；`py -m pytest -m e2e`（2 绿 / 真调 API）。
   旧的 `00_smoke_test.py` / `01_run_agent.py` 保留为「手动演示脚本」，文件头注明不是断言测试。
@@ -649,11 +664,11 @@ compact_by_directive 保头假设被破坏（各路径 messages[0] 恒纯文本 
   字符 + 提示分段读取，止住 3 万 token 涌入的爆炸。
 - 验证：截断（29万字符→8080）、先读再改（拒绝未读文件/放行新文件）、并行读3文件端到端跑通。
 
-## 裸 TAOR 循环 + KV Cache 调查〔原 P1〕
+## 裸 Agent Loop（TAOR）+ KV Cache 调查〔原 P1〕
 
 - `tools.py`：工具层（read_file / run_command + 手写 schema + execute_tool 分发）。
-- `agent.py`：核心 TAOR 循环（Think→Act→Observe→Repeat）+ 每轮 trace/log + max_iterations 护栏。
-- `tests/01_run_agent.py`：两步任务跑通，完整 TAOR 轨迹可见。`main.py`：正式交互式 CLI 入口。
+- `agent.py`：核心 Agent Loop（TAOR：Think→Act→Observe→Repeat）+ 每轮 trace/log + max_iterations 护栏。
+- `tests/01_run_agent.py`：两步任务跑通，完整 Agent Loop（TAOR）轨迹可见。`main.py`：正式交互式 CLI 入口。
 - **Token 调查 trace**：每轮把「实际发出的 messages + usage 4 字段」落盘到
   `traces/<年>/<月>/<日>/run_<时分秒>/task_NN/turn_NN.json`（按日期分层），循环里同步打印
   `in=.. (cache_read=.., cache_write=..)`。
@@ -680,7 +695,7 @@ compact_by_directive 保头假设被破坏（各路径 messages[0] 恒纯文本 
 - **#7 没有 system prompt（✅ 已修）**：普通 Agent 仍可不传以保持原请求形态；当前构造器已支持顶层
   `system_prompt`，Coordinator/Worker/Reviewer/Aggregator 用它建立持久角色边界。Harness 仍负责真正硬拦。
 - **#8 `max_tokens=2048` 写死（✅ 已修）**：已改为「显式 > `CONTEXTFORGE_MAX_TOKENS` > 8192」，
-  主 TAOR 与摘要共同使用；`max_tokens` / `stop_sequence` 现在标记 incomplete，并为可能出现的 tool_use
+  主 Agent Loop（TAOR）与摘要调用共同使用；`max_tokens` / `stop_sequence` 现在标记 incomplete，并为可能出现的 tool_use
   补配对错误结果和未执行审计，不再把截断内容当成功。
 - **#9 验证门对非代码任务也无脑跑检查**：`/check pytest` 后，哪怕问「今天几号」，答完也会强制跑
   pytest；若 pytest 因无关原因失败，纯问答会被反复打回。验证门没有「本任务是否涉及代码」的概念，

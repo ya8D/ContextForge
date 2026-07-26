@@ -3,6 +3,12 @@
 > 这个项目哪里特别、为什么这么设计——一页速览。开发流水见 [PROGRESS.md](./PROGRESS.md)，
 > 稳定约定见 [CLAUDE.md](./CLAUDE.md)。
 
+## Agent Loop（TAOR）：工程术语与教学分阶段兼顾
+
+- **对外称 Agent Loop，项目内保留 TAOR**：TAOR = Think → Act → Observe → Repeat，用于逐阶段学习和
+  trace 标记；它与 ReAct（Reasoning + Acting）思想同源，但不把两个概念强行等同，也避免写成易与前端
+  框架混淆的 `React`。→ [agent.py `_run_loop`](./src/contextforge/agent.py)
+
 ## harness：用代码强制，不靠模型自律
 
 - **先读再改**：没 `read_file` 读过的已存在文件禁止 `write_file`，防模型基于想象的内容盲改。

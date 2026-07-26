@@ -1,6 +1,6 @@
 """
 tests/01_run_agent.py —— Phase 1 手动演示脚本（不是自动化测试）。
-给 agent 一个需要多步工具的任务，观察完整 TAOR 轨迹（靠肉眼看，无断言）。
+给 agent 一个需要多步工具的任务，观察完整 Agent Loop（TAOR）轨迹（靠肉眼看，无断言）。
 
 注意：这是「跑给人看轨迹」的演示脚本，不会被 pytest 收集（文件名不匹配 test_*.py）。
 真正带断言的自动化测试见 tests/test_tools.py / test_agent_logic.py / test_e2e.py。

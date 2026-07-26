@@ -61,7 +61,7 @@ agent 代为自救"这个说法从头到尾就不成立。
 
 这一点**实测坐实了**：构造 `Agent(compact_executor="subagent")`，历史里故意把一个探针文件的值
 说成过期的 `STALE`，真实文件里写的是 `CURRENT`。directive 让压缩时回读核实。结果子 agent **真的
-启动了自己的 TAOR 循环、真的 `read_file` 回读**，摘要里写出了文件真实值 `CURRENT`——而盲总结只有
+启动了自己的 Agent Loop（TAOR）、真的 `read_file` 回读**，摘要里写出了文件真实值 `CURRENT`——而盲总结只有
 历史里的 `STALE` 可抄，绝不可能写出 `CURRENT`。`CURRENT` 一旦出现，就是子 agent 真核实过的铁证。
 （见 [tests/test_e2e.py](../tests/test_e2e.py) 的 `test_subagent_executor_reverifies_by_reading_file`。）
 

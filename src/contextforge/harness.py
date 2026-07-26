@@ -1,5 +1,5 @@
 """
-harness.py —— Harness 约束（给 TAOR 循环套护栏，对照 agent_learning 第 8 章）
+harness.py —— Harness 约束（给 Agent Loop（TAOR）套护栏，对照 agent_learning 第 8 章）
 
 前面 P1-P3 让 agent「能干活、不撑爆」。但它还太天真：可能一个 rm -rf 删掉东西、
 可能卡在同一个错误上反复调同一命令、可能嘴上说「完成了」其实测试没跑过甚至偷删了测试。

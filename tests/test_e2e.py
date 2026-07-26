@@ -1,11 +1,11 @@
 """
-test_e2e.py —— 端到端测试：真调 Anthropic API，验证完整 TAOR 循环能跑通。
+test_e2e.py —— 端到端测试：真调 Anthropic API，验证完整 Agent Loop（TAOR）能跑通。
 
 ⚠️ 会烧少量 token。默认跑 `py -m pytest -m "not e2e"` 会跳过本文件。
    单独跑：py -m pytest -m e2e -v
 
 为什么必须真调 API：前面的纯逻辑测试验证了「零件」（工具、截断、约束），
-但「零件组装成 TAOR 循环、模型真的会调工具」只能靠真跑一次来验证。
+但「零件组装成 Agent Loop（TAOR）、模型真的会调工具」只能靠真跑一次来验证。
 """
 
 import json
@@ -72,7 +72,7 @@ def test_agent_completes_tool_task():
                 )
                 if btype == "tool_use":
                     saw_tool_use = True
-    assert saw_tool_use, "轨迹里没有 tool_use —— 模型没调工具，TAOR 没按预期走"
+    assert saw_tool_use, "轨迹里没有 tool_use —— 模型没调工具，Agent Loop（TAOR）没按预期走"
 
 
 @pytest.mark.e2e
@@ -435,7 +435,7 @@ def test_compact_directive_drops_repeated_tic():
 # 然后断言摘要里出现 CURRENT（真实值）——盲总结（_summarize）只有历史里的 STALE 可抄、
 # 绝不可能写出 CURRENT，所以 CURRENT 一旦出现，就铁证子 agent 真的 read_file 核实了。
 # （不断言 STALE 缺席：子 agent 为说明"值已更新"提一嘴旧值是合理表述，见下方断言注释。）
-# ⚠️ 慢（子 agent 跑多轮 TAOR）+ 真调 API；用户已确认这条不在意 token。
+# ⚠️ 慢（子 agent 跑多轮 Agent Loop（TAOR））+ 真调 API；用户已确认这条不在意 token。
 
 _PROBE_CURRENT = "CURRENT_VALUE_9911"   # 文件里真实的当前值
 _PROBE_STALE = "STALE_VALUE_1234"       # 历史里过期的旧值（故意与当前不符）

@@ -3,7 +3,7 @@ test_agent_logic.py —— agent.py 里纯逻辑函数的测试（不调 API，�
 
 只测模块级纯函数：_truncate_for_feedback（回喂截断）、_to_serializable、
 _log（T1 日志分级）、_dump_turn（T1 trace 开关）。
-不测完整 TAOR 循环 —— 那个要真调 API，见 test_e2e.py。
+不测完整 Agent Loop（TAOR）——那个要真调 API，见 test_e2e.py。
 
 跑法：py -m pytest tests/test_agent_logic.py -v
 """
