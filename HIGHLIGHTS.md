@@ -55,8 +55,9 @@
   服务端自报路由结果（经本地代理时仍以信任代理为前提）。→ [agent.py `_dump_turn`](./src/contextforge/agent.py)
 - **日志分级用字符串枚举**：`CONTEXTFORGE_LOG=off/normal/debug` 比 `0/1/2` 自解释，且与 `CONTEXTFORGE_TRACE=on/off`
   统一；`error` 级即使 `off` 档也照打。屏幕分级和落盘是两个独立开关。→ [agent.py `_log`](./src/contextforge/agent.py)
-- **配置读取一律「显式 > 环境变量 > 默认」**：`model` 读 `ANTHROPIC_MODEL`、`compact_directive` 读
-  `CONTEXTFORGE_COMPACT_DIRECTIVE`，写 `.env` 即持久生效，显式传参仍可覆盖。→ [agent.py `Agent.__init__`](./src/contextforge/agent.py)
+- **配置优先级按用途区分**：`Agent(model=...)` 仍最高；项目 `.env` 中三项 Anthropic 连接配置覆盖 IDE/
+  父进程注入值，保证本项目模型选择不被宿主模型带跑；`CONTEXTFORGE_LOG=debug` 等临时运行开关仍以当前进程
+  为准。→ [agent.py `_load_project_dotenv` / `Agent.__init__`](./src/contextforge/agent.py)
 
 ## 测试哲学
 

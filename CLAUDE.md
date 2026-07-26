@@ -29,10 +29,12 @@
   **只有上个 PR 合并了才继续**——否则新分支会基于过时的 main，且可能遗漏未合并的工作。确认后
   从最新 main 切 `feat/<任务>` 分支。
 - **模型 ID 从环境读，绝不写死**：用 `os.environ.get("ANTHROPIC_MODEL")`。
-  当前环境由 VSCode Copilot 注入以下变量，SDK 自动读取，**无需 `.env`**：
+  项目根 `.env` 可配置以下三项；若 VS Code / Claude Code 父进程注入了同名值，**项目 `.env` 优先**，
+  避免 IDE 当前模型意外替换 ContextForge 要测试的模型：
   - `ANTHROPIC_AUTH_TOKEN`（鉴权）
   - `ANTHROPIC_BASE_URL`（本地代理地址）
   - `ANTHROPIC_MODEL`（如 `claude-opus-4-8[1m]`）
+  该覆盖仅限这三项；`CONTEXTFORGE_LOG=debug` 等临时运行开关仍由当前进程优先。
 
 ## 日志开关（T1）
 

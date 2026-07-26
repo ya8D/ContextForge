@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 import anthropic
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 from contextforge.context import (
     COMPACT_THRESHOLD_TOKENS,
@@ -50,12 +50,25 @@ from contextforge.tools import (
     tool_success,
 )
 
-# 加载项目根的 .env（代理凭据：ANTHROPIC_AUTH_TOKEN / BASE_URL / MODEL）。
-# 这套凭据由 VSCode 扩展注入其子进程，普通终端拿不到，故落到本地 .env。
-# 本文件位于 src/contextforge/ 下，.env 和 traces/ 实际在项目根，
-# 故要上跳两级（src/contextforge/ → src/ → 项目根），而非本文件所在目录。
+# 加载项目根的 .env。本项目把它视为 Anthropic 连接配置的明确本地选择：VS Code / Claude Code
+# 可能给子进程注入同名变量，但 ANTHROPIC_MODEL / BASE_URL / AUTH_TOKEN 仍以项目 .env 为准。
+# 只覆盖这三项，避免 CONTEXTFORGE_LOG=debug 这类临时运行开关也被 .env 反向盖掉。
+# 本文件位于 src/contextforge/ 下，.env 和 traces/ 实际在项目根，故上跳两级定位项目根。
 _HERE = Path(os.path.abspath(__file__)).parent.parent.parent
-load_dotenv(_HERE / ".env")
+_DOTENV_PATH = _HERE / ".env"
+
+
+def _load_project_dotenv(path: Path) -> None:
+    """加载项目配置，并让 .env 中的 Anthropic 连接三项覆盖父进程注入值。"""
+    load_dotenv(path)
+    dotenv_config = dotenv_values(path)
+    for key in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"):
+        value = dotenv_config.get(key)
+        if value is not None:
+            os.environ[key] = value
+
+
+_load_project_dotenv(_DOTENV_PATH)
 
 # trace 落盘根目录（已在 .gitignore 中忽略）。
 _TRACES_ROOT = _HERE / "traces"

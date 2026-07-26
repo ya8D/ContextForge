@@ -32,13 +32,18 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
   `request_model`（请求侧 `self.model`）和 `response_model`（响应侧 `Message.model`）。原 `model`
   保留为请求侧兼容别名，避免旧分析脚本突然失效。轻量测试替身没有 `model` 时落 `null`，可观察性不能反过来
   改变 TAOR 业务状态。
+- **配置优先级补正**：真实基线意外发现父进程注入了 `ANTHROPIC_MODEL=gpt-5.6-sol[1m]`，而项目 `.env`
+  明确配置 `claude-opus-4.8[1m]`；`load_dotenv()` 默认不覆盖，导致前者胜出。现把项目 `.env` 视为本项目
+  Anthropic 连接配置的明确选择，仅让其中的 `AUTH_TOKEN / BASE_URL / MODEL` 覆盖父进程同名值；
+  `CONTEXTFORGE_LOG=debug` 等临时开关仍由当前进程优先。纯逻辑测试验证模型会覆盖、日志开关不会覆盖。
 - **信任边界**：当前请求经过 `ANTHROPIC_BASE_URL` 本地代理，因此 `response_model` 证明的是“代理/服务端
   返回对象自报的模型”，不能在密码学意义上证明上游实际推理模型；本项目明确接受并信任该开源代理。
 - **测试有效性**：新增纯逻辑测试使用不同的请求/响应 sentinel，防止实现偷懒把 `self.model` 同时写进两栏；
   在未实现基线上稳定 `TypeError`（`_dump_turn` 不接受 `response_model`），恢复实现后通过。新增真实 API e2e
   捕获真实 `Message.model` 并断言它与 trace `response_model` 逐字一致。
-- **验证**：真实 API e2e **1 passed**；同一真实场景复验得到 `request_model == response_model ==
-  gpt-5.6-sol[1m]`；全量非 e2e **151 passed, 21 deselected**；`py_compile` 与 `git diff --check` 通过。
+- **验证**：真实 API e2e **1 passed**；它先暴露父进程实际覆盖成 `gpt-5.6-sol[1m]`，修正 `.env`
+  优先级后同一真实调用得到 `request_model == response_model == claude-opus-4.8[1m]`。全量非 e2e
+  **153 passed, 21 deselected**；`py_compile` 与 `git diff --check` 通过。
 
 ---
 
