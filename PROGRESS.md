@@ -9,6 +9,41 @@
 > 环境变量前缀 `CONTEXTFORGE_`）。下方历史条目中出现的 `myagent` / `MYAGENT_` / `P1-P5` / `T1-T6`
 > 是**当时的名字/编号**，作为历史记录保留（现已弃用编号，改语义标题；老编号作别名标注帮对应）。
 
+## 请求前 Token Counting 与保守压缩兜底
+
+- **问题与改前事实**：旧 Agent 只能在 Messages 返回后从 `usage` 发现上下文已经很大，无法阻止当前请求
+  先撞窗口；摘要失败时也没有请求前安全出口。真实代理探针进一步确认：
+  `messages.count_tokens(model="claude-opus-4.8[1m]")` 正常返回 `MessageTokensCount`，而同一带后缀 ID 的
+  Models API 返回 404，所以硬窗口不能靠猜模型名或把 500K 软阈值冒充物理上限。
+- **请求前准入**：`_run_loop` 每轮先从唯一 request 构造器提取相同的 model/messages/system/tools 调官方
+  Token Counting；压缩候选必须 recount 后才能发送。`compact_threshold` 明确为质量/成本软阈值；新增
+  `CONTEXTFORGE_MAX_INPUT_TOKENS` 作为代理场景的显式硬窗口，安全预算还预留 `max_tokens` 与至少 4096/
+  窗口 1% 的估算余量。count 失败 fail-closed，估算值不混入真实 Messages/team usage。
+- **用户输入与第一轮保护**：不再把全会话 `messages[0]` 偷懒当成当前任务。`_run_once` 保存最近一次
+  `run(task)` 追加消息的对象边界；语义压缩逐字保留该完整用户原文、全会话最早入口，以及二者对应的
+  第一完整轮，最近 3 轮也原样保留。测试用 `FIRST_SENTINEL` 证明第一轮内容既不进入摘要 prompt，也不被
+  候选伪造替换。
+- **摘要失败兜底收紧**：没有按“越旧越不重要”删除任何完整轮。硬超限时语义摘要最多尝试一次；失败后
+  唯一自动降级是 micro-compaction，只替换可重建的旧 `tool_result.content`，保留消息数量、assistant
+  分析、用户自然语言、tool_use_id/is_error 与配对。仍超限则 `incomplete/context_budget_exhausted`，
+  `request_sent=false`，由用户显式选择 `/compact <要求>`、缩小输入/工具或 reset。
+- **测试有效性**：新增专项测试先在旧生产代码上 collection fail（缺少受保护压缩函数），恢复实现后
+  **11 passed**。四次定向变异分别绕过 preflight、让 count 失败放行、删除 tool_result 破坏配对、把第一轮
+  纳入摘要，四条目标测试均失败；恢复后通过。真实 API 验证 count 值直接阻止推理（create/stream 0 次），
+  受保护语义压缩在真实 8 轮工具任务中完成并继续任务，Sub-agent STALE/CURRENT 回读测试仍通过。
+- **严格审查补强**：非 e2e 默认隔离 Token Counting 网络副作用，避免只 mock create 的旧测试偷偷访问真实
+  API；count/create 测试加入非空工具 schema；工具配对改为逐条检查紧邻关系与重复 ID；新增
+  `model_context_window_exceeded` 配对及结构化状态；多任务摘要按时间位置拆成旧/当前两段；e2e 明确拒绝
+  `[未完成]` 护栏假绿；显式非正硬窗口直接报错。
+- **依赖与派生 Agent 复审**：SDK 下限提升到首个支持 GA `messages.count_tokens` 的 `anthropic>=0.41.0`；
+  普通 `spawn_subagent` 继承父 Agent 的显式硬窗口，压缩 Sub-agent 同时继承父级 `max_input_tokens` 与
+  `max_tokens`，避免代理场景绕过护栏或因错误输出预留拒绝启动；两条 e2e 用工具审计确认 8 个命令真实
+  成功且顺序正确，不再只信模型文字自报。
+- **最终验证**：专项 **11 passed**；全量非 e2e **164 passed, 22 deselected**；目标真实上下文测试
+  **4 passed**；完整真实 API 套件 **22 passed, 164 deselected**。
+
+---
+
 ## 演进时间线（从地基到最新，一眼看全貌）
 
 环境准备 → 裸 Agent Loop（TAOR） → 多工具/并行/截断/write_file → 自动化测试 → 上下文压缩 →
@@ -16,7 +51,8 @@ Harness 三根柱子 → LoopDetector 修正 → Sub-agent → 解开循环 impo
 标准包布局 → 快速启动命令 → 日志开关 → 客制化 compact → 简历前缺口补齐 →
 **项目更名 ContextForge** → 验证门用户入口 → 指令驱动压缩 → [CF] 前缀+trace 分层 →
 验证门 e2e → 学习笔记（docs/ 9 篇）→ Coordinator–Worker–Reviewer 多 Agent 协作 Demo →
-trace 同时记录请求模型与响应模型 → 统一 Agent Loop（TAOR）术语 → **team.json 时间人类可读化**。
+trace 同时记录请求模型与响应模型 → 统一 Agent Loop（TAOR）术语 → team.json 时间人类可读化 →
+**请求前 Token Counting + 保任务入口/第一轮的有界压缩**。
 
 ---
 

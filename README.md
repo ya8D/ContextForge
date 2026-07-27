@@ -16,7 +16,7 @@
 |---|---|---|
 | **P1 裸 Agent Loop（TAOR）** | agent 的本质：Think → Act → Observe → Repeat（带工具的 while 循环） | `agent.py` |
 | **P2 多工具 + 并行 + 回喂截断** | `@tool` 装饰器自动生成 schema；一轮多工具并行执行；先读再改约束 | `tools.py` |
-| **P3 上下文压缩** | 用真实 usage 判上下文规模，超阈值把中段历史压成摘要（保头/压中段/保尾） | `context.py` |
+| **P3 上下文压缩** | 每轮发送前用 Anthropic Token Counting 预检；超软阈值时保任务入口/第一轮/近 3 轮、压真正中段；硬超限时有界阻止 | `agent.py` + `context.py` |
 | **P4 Harness 三根柱子** | 权限拦截（危险命令/路径遍历）、死循环检测、验证门（防假完成） | `harness.py` |
 | **P5 Sub-agent** | 主 agent 派生**上下文隔离**的子 agent 跑子任务、只回传结论 | `agent.py`（`spawn_subagent`） |
 | **多 Agent 协作 Demo** | Coordinator 结构化拆分 → 2～4 个只读 Worker 有界并行 → Reviewer 回读证据 → 一次定向补充 → 独立 Aggregator 汇总 | `collaboration.py` |
@@ -26,7 +26,11 @@
 - **Agent Loop（TAOR）**：业界交流称 Agent Loop；本项目按 Think（调 LLM 决策）→ Act（执行工具）→
   Observe（回喂结果）→ Repeat 将四阶段简称为 TAOR。它与 ReAct（Reasoning + Acting）思想同源，
   但这里强调的是 Harness 真正执行的循环结构，而非把二者当成完全相同的术语。
-- **每轮都发完整历史**：API 无状态，KV Cache 让重发的部分便宜（`input + cache_read + cache_write` = 真实发出总量）。
+- **请求前精确预检**：每轮用与实际请求一致的 model/messages/system/tools 调 `messages.count_tokens`；
+  软阈值负责质量/成本压缩，显式 `CONTEXTFORGE_MAX_INPUT_TOKENS` 负责硬准入，估算值不混入计费 usage。
+- **保护任务入口与第一轮**：最近一次 `run(task)` 的完整用户原文、全会话最早入口，以及各自第一完整轮都不进摘要/清理区；
+  语义压缩失败只清旧工具结果正文，不自动删除任何完整轮，仍超硬预算就停止发送。
+- **每轮重发最终历史**：API 无状态，KV Cache 让重发的部分便宜（`input + cache_read + cache_write` = 真实发出总量）。
 - **用代码强制，不靠模型自律**：harness 约束（权限、循环、验证）都卡在「模型请求 → 真正执行」之间。
 - **决策交给模型，执行和约束留给代码**：单个子 agent 何时派由模型判断；团队协作中的并发、协议校验和
   最多一次定向补充由代码控制，避免模型自己决定控制流。

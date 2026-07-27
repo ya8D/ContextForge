@@ -115,6 +115,42 @@ def test_agent_no_tool_task_ends_in_one_shot():
 
 
 @pytest.mark.e2e
+def test_real_count_tokens_blocks_inference_and_preserves_latest_user_input(monkeypatch):
+    """真实 Token Counting 结果必须直接参与准入；已知超限时不得调用 Messages 推理。"""
+    agent = Agent(
+        tools=[],
+        max_tokens=64,
+        compact_threshold=999_999,
+        check_command=None,
+    )
+    task = "REAL_COUNT_LATEST_USER_SENTINEL：这条完整用户输入不能丢"
+    request = agent._build_message_request([{"role": "user", "content": task}])
+    real_count = agent.client.messages.count_tokens(
+        **agent._build_count_request(request)
+    ).input_tokens
+
+    # safe_budget = max_input - 64 - 4096；令它恰好比真实 count 小 1。
+    agent.max_input_tokens = real_count + 64 + 4096 - 1
+    inference_calls = []
+
+    def forbidden_inference(**kwargs):
+        inference_calls.append(kwargs)
+        raise AssertionError("真实 count 已判超限，Messages 推理绝不能发送")
+
+    monkeypatch.setattr(agent.client.messages, "create", forbidden_inference)
+    monkeypatch.setattr(agent.client.messages, "stream", forbidden_inference)
+
+    detail = agent.run_detailed(task)
+
+    assert detail.status == "incomplete"
+    assert detail.failure_code == "context_budget_exhausted"
+    assert detail.preflight["estimated_input_tokens"] == real_count
+    assert detail.preflight["request_sent"] is False
+    assert inference_calls == []
+    assert agent.messages[0]["content"] == task
+
+
+@pytest.mark.e2e
 def test_compaction_triggers_and_task_survives():
     """P3：真调 API 验证「压缩链」端到端通。
 
@@ -128,20 +164,39 @@ def test_compaction_triggers_and_task_survives():
     2. 历史里出现过「前情摘要」消息（说明压缩真的执行了，不是没触发）。
     """
     # 阈值压到极小（200 token）：跑几轮工具后上下文必然超过，逼出压缩。
-    agent = Agent(max_iterations=12, compact_threshold=200)
+    # 语义压缩会保留任务入口、第一轮和最近 3 轮；只有中段足够大时 count 才会真正下降。
+    # 使用受限工具菜单，避免全局 schema 固定开销掩盖摘要节省，并明确安排 8 个串行轮次。
+    from contextforge.tools import tool_schemas_for
+    agent = Agent(
+        max_iterations=16,
+        compact_threshold=200,
+        tools=tool_schemas_for({"run_command"}),
+    )
     # 强制「串行多轮」：明确要求一次只跑一个命令、看到结果再跑下一个，
     # 阻止模型一轮并行做完（那样历史滚不够多轮，压缩的中段就切不出来）。
-    # 需要 > KEEP_RECENT_TURNS(3) 轮，压缩才有中段可压，所以安排 5 个命令。
+    # 第一轮与最近 3 轮受保护，因此安排 8 个命令，让真正中段足够大、摘要后 token 确实下降。
     task = (
         "请严格一步一步来，一次只运行一个命令，必须看到上一个命令的输出后再运行下一个，"
         "不要在同一轮里同时运行多个命令。依次用 run_command 运行："
-        "第1步 echo AAA、第2步 echo BBB、第3步 echo CCC、第4步 echo DDD、第5步 echo EEE，"
+        "第1步 echo AAA、第2步 echo BBB、第3步 echo CCC、第4步 echo DDD、第5步 echo EEE、"
+        "第6步 echo FFF、第7步 echo GGG、第8步 echo HHH，"
         "每步都把输出告诉我，最后总结你一共运行了几个命令。"
     )
     final = agent.run(task)
 
-    # 断言 1：压缩后任务仍完成，有非空答案
+    # 断言 1：压缩后任务确实完成 8 步；非空的护栏串不算成功。
     assert isinstance(final, str) and final.strip()
+    assert not final.startswith("[未完成]"), "压缩后任务撞护栏不算成功"
+    assert "8" in final, "最终答案没有确认完成 8 个命令"
+    successful_commands = [
+        call["input"]["command"]
+        for call in agent.tool_calls_snapshot()
+        if call["name"] == "run_command" and call.get("executed") and call.get("succeeded")
+    ]
+    assert successful_commands == [
+        "echo AAA", "echo BBB", "echo CCC", "echo DDD",
+        "echo EEE", "echo FFF", "echo GGG", "echo HHH",
+    ], "必须由工具审计证明 8 个命令按顺序真实成功，不能只信模型自报"
 
     # 断言 2：历史里出现过「前情摘要」消息（压缩真的触发并重写了 messages）
     saw_summary = False
@@ -162,19 +217,35 @@ def test_compaction_triggers_via_env_threshold(monkeypatch):
     （如 Chromium 大项目调高到 800K）真的会改变压缩触发行为——这里为省钱用小数值 800 逼出
     压缩，链路与真实调高到 800K 完全一致，只是量级相差 1000 倍。
     """
-    monkeypatch.setenv("CONTEXTFORGE_COMPACT_THRESHOLD", "800")  # 只走环境变量入口
-    agent = Agent(max_iterations=12)  # 不传 compact_threshold
-    assert agent.compact_threshold == 800, "环境变量阈值没被读进来 —— T6 入口没生效"
+    monkeypatch.setenv("CONTEXTFORGE_COMPACT_THRESHOLD", "200")  # 只走环境变量入口
+    from contextforge.tools import tool_schemas_for
+    agent = Agent(
+        max_iterations=16,
+        tools=tool_schemas_for({"run_command"}),
+    )  # 不传 compact_threshold
+    assert agent.compact_threshold == 200, "环境变量阈值没被读进来 —— T6 入口没生效"
 
     task = (
         "请严格一步一步来，一次只运行一个命令，必须看到上一个命令的输出后再运行下一个，"
         "不要在同一轮里同时运行多个命令。依次用 run_command 运行："
-        "第1步 echo AAA、第2步 echo BBB、第3步 echo CCC、第4步 echo DDD、第5步 echo EEE，"
+        "第1步 echo AAA、第2步 echo BBB、第3步 echo CCC、第4步 echo DDD、第5步 echo EEE、"
+        "第6步 echo FFF、第7步 echo GGG、第8步 echo HHH，"
         "每步都把输出告诉我，最后总结你一共运行了几个命令。"
     )
     final = agent.run(task)
 
     assert isinstance(final, str) and final.strip()
+    assert not final.startswith("[未完成]"), "环境变量触发压缩后撞护栏不算成功"
+    assert "8" in final, "最终答案没有确认完成 8 个命令"
+    successful_commands = [
+        call["input"]["command"]
+        for call in agent.tool_calls_snapshot()
+        if call["name"] == "run_command" and call.get("executed") and call.get("succeeded")
+    ]
+    assert successful_commands == [
+        "echo AAA", "echo BBB", "echo CCC", "echo DDD",
+        "echo EEE", "echo FFF", "echo GGG", "echo HHH",
+    ]
     saw_summary = any(
         isinstance(m.get("content"), str) and "前情摘要" in m["content"]
         for m in agent.messages

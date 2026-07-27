@@ -37,8 +37,8 @@ from contextforge.context import (
     COMPACT_THRESHOLD_TOKENS,
     compact_by_directive,
     compact_messages,
-    current_context_tokens,
-    should_compact,
+    compact_messages_protected,
+    micro_compact_tool_results,
 )
 from contextforge.harness import LoopDetector, ValidationGate, check_tool_call
 from contextforge.tools import (
@@ -131,8 +131,25 @@ def _resolve_compact_threshold(explicit: int | None) -> int:
 # 对照 Claude Code：其辅助调用用 4096，主循环有「不够时升级 max_tokens」的机制；本项目不做动态
 # 升级那套（过重），取一个够用的静态默认 + 可配置即可。
 MAX_TOKENS_DEFAULT = 8192
+# Token Counting 是估算值，官方说明与真实 input usage 可能有小幅差异；硬准入额外保留至少
+# 4096 token、或窗口的 1%（取较大者），避免把估算误差顶到物理边界。
+_MIN_INPUT_SAFETY_MARGIN = 4096
 # Anthropic Python SDK 对预计超过 10 分钟的同步请求强制使用 stream；当前阈值约 21,333。
 _STREAMING_TOKEN_THRESHOLD = 21_333
+
+
+def _positive_int_env(name: str) -> int | None:
+    """读取正整数环境变量；未设置返回 None，非法值明确报错。"""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = int(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是正整数") from exc
+    if value <= 0:
+        raise ValueError(f"{name} 必须是正整数")
+    return value
 
 
 def _resolve_max_tokens(explicit: int | None) -> int:
@@ -193,6 +210,8 @@ class AgentRunResult:
     tool_calls: list[dict]
     error: str | None
     trace_metadata: dict
+    failure_code: str | None = None
+    preflight: dict | None = None
 
 
 def _zero_usage() -> dict[str, int]:
@@ -256,6 +275,8 @@ class Agent:
                  compact_directive: str | None = None,
                  compact_executor: str | None = None,
                  max_tokens: int | None = None,
+                 max_input_tokens: int | None = None,
+                 allow_preflight_compaction: bool = True,
                  system_prompt: str | None = None,
                  local_tools: list[LocalTool] | None = None,
                  trace_metadata: dict | None = None):
@@ -271,6 +292,17 @@ class Agent:
         # 单轮输出 token 上限（P2）。优先级：显式传参 > 环境变量 CONTEXTFORGE_MAX_TOKENS > 默认 8192。
         # 原先硬编码 2048 过小、大文件一轮写不完；做成可配置，写大文件时可调高（≤ 模型约 32K 上限）。
         self.max_tokens = _resolve_max_tokens(max_tokens)
+        # 硬输入窗口与 500K 软压缩阈值是两回事。代理路由 ID 可能不被 Models API 识别，
+        # 因此只接受显式/环境配置；未配置时仍逐轮 count 和做软压缩，但硬预算标为 unknown。
+        if max_input_tokens is not None:
+            if max_input_tokens <= 0:
+                raise ValueError("max_input_tokens 必须是正整数")
+            self.max_input_tokens = max_input_tokens
+        else:
+            self.max_input_tokens = _positive_int_env("CONTEXTFORGE_MAX_INPUT_TOKENS")
+        self.allow_preflight_compaction = allow_preflight_compaction
+        if self.max_input_tokens is not None and self._safe_input_budget() <= 0:
+            raise ValueError("max_input_tokens 必须大于 max_tokens 与安全余量之和")
         # 上下文压缩阈值（真实 token）。优先级：显式传参 > 环境变量 CONTEXTFORGE_COMPACT_THRESHOLD
         # （写 .env 持久生效，Chromium 这类大项目可调高以用满更多上下文再压）> 默认 500K。
         # 测试可传小值以便低成本触发压缩、验证「压缩链真的通」而不必真塞 500K。
@@ -305,6 +337,9 @@ class Agent:
         self._last_run_tool_calls: list[dict] = []
         self._last_stop_reason: str | None = None
         self._last_run_status = "succeeded"
+        self._last_failure_code: str | None = None
+        self._last_preflight: dict = {}
+        self._current_task_anchor: dict | None = None
         # ── T5-A 客制化 compact ──
         # 会话级压缩偏好：被动压缩（到阈值自动触发）默认带上它。
         # 优先级：显式传参 > 环境变量 CONTEXTFORGE_COMPACT_DIRECTIVE（写 .env 持久生效）> None（默认四维）。
@@ -364,6 +399,8 @@ class Agent:
         self._last_run_tool_calls = []
         self._last_stop_reason = None
         self._last_run_status = "succeeded"
+        self._last_failure_code = None
+        self._last_preflight = {}
 
         self.task_counter += 1
         self.current_task_dir = self.trace_dir / f"task_{self.task_counter:02d}"
@@ -379,7 +416,11 @@ class Agent:
         # 同一事务回滚。否则任务读文件后 API 失败，历史已忘记正文，下一任务却仍能直接覆盖文件。
         _msgs_snapshot = list(self.messages)
         _read_files_snapshot = set(self.read_files)
-        self.messages.append({"role": "user", "content": task})
+        # 保存对象引用而非索引：preflight 压缩会重写列表，但当前 run(task) 的完整用户原文必须
+        # 可被精确识别和逐字保留；不能在多任务会话里错误地永远取 messages[0]。
+        task_anchor = {"role": "user", "content": task}
+        self._current_task_anchor = task_anchor
+        self.messages.append(task_anchor)
 
         try:
             result = self._run_loop()
@@ -409,6 +450,8 @@ class Agent:
                 tool_calls=[],
                 error="RuntimeError: 同一个 Agent 实例不能并发或递归运行",
                 trace_metadata=copy.deepcopy(self.trace_metadata),
+                failure_code="agent_reentrant",
+                preflight={},
             )
 
         error = None
@@ -437,6 +480,8 @@ class Agent:
                 tool_calls=copy.deepcopy(self._last_run_tool_calls),
                 error=error,
                 trace_metadata=copy.deepcopy(self.trace_metadata),
+                failure_code=self._last_failure_code,
+                preflight=copy.deepcopy(self._last_preflight),
             )
         finally:
             self._run_lock.release()
@@ -485,6 +530,7 @@ class Agent:
             "_read_files": self.read_files,
             "_model": self.model,
             "_max_tokens": self.max_tokens,
+            "_max_input_tokens": self.max_input_tokens,
             "_parent_trace": str(getattr(self, "current_task_dir", self.trace_dir)),
         }
         for parameter, value in injected.items():
@@ -550,32 +596,193 @@ class Agent:
             ],
         }
 
+    def _input_safety_margin(self) -> int | None:
+        """硬窗口已知时的 Token Counting 估算安全余量。"""
+        if self.max_input_tokens is None:
+            return None
+        return max(_MIN_INPUT_SAFETY_MARGIN, self.max_input_tokens // 100)
+
+    def _safe_input_budget(self) -> int | None:
+        """为本轮完整输出预留空间后的最大安全输入 token。"""
+        margin = self._input_safety_margin()
+        if self.max_input_tokens is None or margin is None:
+            return None
+        return self.max_input_tokens - self.max_tokens - margin
+
+    def _build_message_request(self, messages: list[dict] | None = None) -> dict:
+        """在唯一位置组装主推理 request，供 count 与 create/stream 共用。"""
+        request = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": self.messages if messages is None else messages,
+        }
+        if self.tool_schemas:
+            request["tools"] = self.tool_schemas
+        if self.system_prompt:
+            request["system"] = self.system_prompt
+        return request
+
+    @staticmethod
+    def _build_count_request(request: dict) -> dict:
+        """提取 Token Counting 支持的输入字段；max_tokens 由本地硬预算另行预留。"""
+        return {
+            key: _to_serializable(request[key])
+            for key in ("model", "messages", "system", "tools")
+            if key in request
+        }
+
+    def _count_request(self, request: dict) -> int:
+        # 调用开始前计数，失败的 HTTP/本地校验尝试也必须进入可观察性。
+        if self._last_preflight:
+            self._last_preflight["count_calls"] = (
+                self._last_preflight.get("count_calls", 0) + 1
+            )
+        response = self.client.messages.count_tokens(**self._build_count_request(request))
+        return int(response.input_tokens)
+
+    def _dispatch_message(self, request: dict):
+        """只接收 preflight 放行后的 request。"""
+        if self.max_tokens > _STREAMING_TOKEN_THRESHOLD:
+            with self.client.messages.stream(**request) as stream:
+                return stream.get_final_message()
+        return self.client.messages.create(**request)
+
+    def _blocked_preflight_trace(self, turn: int) -> None:
+        """guard 阻止推理时也落一轮 trace，但不伪造模型响应或 stop_reason。"""
+        self._dump_turn(
+            turn,
+            _to_serializable(self.messages) if _trace_enabled() else None,
+            _zero_usage(),
+            None,
+            None,
+            preflight=self._last_preflight,
+        )
+
+    def _preflight_request(self, turn: int) -> tuple[dict | None, str | None]:
+        """count → 有界压缩/recount → 放行或阻止；绝不发送已知硬超限请求。"""
+        original_request = self._build_message_request()
+        budget = self._safe_input_budget()
+        info = {
+            "decision": None,
+            "estimated_input_tokens": None,
+            "final_input_tokens": None,
+            "compact_threshold": self.compact_threshold,
+            "max_input_tokens": self.max_input_tokens,
+            "reserved_output_tokens": self.max_tokens,
+            "safety_margin": self._input_safety_margin(),
+            "safe_input_budget": budget,
+            "hard_limit_unknown": budget is None,
+            "semantic_attempted": False,
+            "semantic_error": None,
+            "micro_compaction_attempted": False,
+            "count_calls": 0,
+            "request_sent": False,
+        }
+        self._last_preflight = info
+
+        try:
+            original_tokens = self._count_request(original_request)
+            info["estimated_input_tokens"] = original_tokens
+            info["final_input_tokens"] = original_tokens
+        except Exception as exc:  # noqa: BLE001
+            info["decision"] = "block_count_failed"
+            info["error"] = f"{type(exc).__name__}: {exc}"
+            self._last_run_status = "failed"
+            self._last_failure_code = "preflight_count_failed"
+            self._blocked_preflight_trace(turn)
+            raise RuntimeError(f"Token Counting 请求失败：{type(exc).__name__}: {exc}") from exc
+
+        hard_over = budget is not None and original_tokens > budget
+        soft_over = original_tokens >= self.compact_threshold
+        if not hard_over and not soft_over:
+            info["decision"] = "allow_original"
+            return original_request, None
+
+        # 当前任务连第一完整轮都还没有时，语义压缩与 micro-compaction 都没有可操作中段。
+        # 硬超限直接 block；软超阈值则发送已经 count 且硬安全/硬窗口未知的原请求。
+        candidate = None
+        if self.allow_preflight_compaction and self._current_task_anchor is not None:
+            info["semantic_attempted"] = True
+            try:
+                candidate, stats = compact_messages_protected(
+                    self.messages,
+                    summarizer=self._pick_summarizer(),
+                    task_anchor=self._current_task_anchor,
+                    directive=self.compact_directive,
+                )
+                if stats is None:
+                    candidate = None
+            except Exception as exc:  # noqa: BLE001
+                info["semantic_error"] = f"{type(exc).__name__}: {exc}"
+                candidate = None
+
+        if candidate is not None:
+            candidate_request = self._build_message_request(candidate)
+            try:
+                candidate_tokens = self._count_request(candidate_request)
+            except Exception as exc:  # noqa: BLE001
+                info["semantic_error"] = f"recount {type(exc).__name__}: {exc}"
+            else:
+                info["semantic_input_tokens"] = candidate_tokens
+                if candidate_tokens < original_tokens and (
+                    budget is None or candidate_tokens <= budget
+                ):
+                    self.messages = candidate
+                    info["final_input_tokens"] = candidate_tokens
+                    info["decision"] = "allow_semantic_compaction"
+                    return self._build_message_request(), None
+                info["semantic_error"] = "摘要候选未降低 token 或仍超过硬预算"
+
+        if not hard_over:
+            # 软压缩只是优化，失败时不允许用确定性删除替代；发送已成功 count 的安全原请求。
+            info["decision"] = "allow_original_after_soft_failure"
+            return original_request, None
+
+        if self.allow_preflight_compaction and self._current_task_anchor is not None:
+            info["micro_compaction_attempted"] = True
+            micro, stats = micro_compact_tool_results(
+                self.messages,
+                task_anchor=self._current_task_anchor,
+            )
+            if stats is not None:
+                micro_request = self._build_message_request(micro)
+                try:
+                    micro_tokens = self._count_request(micro_request)
+                except Exception as exc:  # noqa: BLE001
+                    info["micro_error"] = f"{type(exc).__name__}: {exc}"
+                else:
+                    info["micro_input_tokens"] = micro_tokens
+                    if micro_tokens < original_tokens and micro_tokens <= budget:
+                        self.messages = micro
+                        info["final_input_tokens"] = micro_tokens
+                        info["decision"] = "allow_micro_compaction"
+                        return self._build_message_request(), None
+                    info["micro_error"] = "清理旧工具正文后仍超过硬预算"
+
+        info["decision"] = "block_context_budget"
+        self._last_run_status = "incomplete"
+        self._last_failure_code = "context_budget_exhausted"
+        self._blocked_preflight_trace(turn)
+        return None, (
+            f"[未完成] 请求前估算输入 {original_tokens} token，超过安全预算 {budget}；"
+            "语义压缩和保守工具结果清理仍无法安全发送。完整用户输入和第一轮均已保留，"
+            "请用 /compact <要求>、缩小输入/工具菜单，或 reset 后重试。"
+        )
+
     def _run_loop(self) -> str:
         """Agent Loop（TAOR）主循环本体（从 run() 抽出，便于 run() 在外层统一做失败回滚）。"""
         for i in range(1, self.max_iterations + 1):
             _log(f"\n🔄 ===== Agent Loop（TAOR）第 {i}/{self.max_iterations} 轮 =====", "")
 
-            # trace 关闭时不复制完整历史；多轮大文件会话里这能避免无收益的近 O(n²) 序列化。
-            messages_sent = _to_serializable(self.messages) if _trace_enabled() else None
-
-            # ── Think：调 LLM，让模型决定下一步 ──
-            request = {
-                "model": self.model,
-                "max_tokens": self.max_tokens,
-                "messages": self.messages,
-            }
-            # 有工具才传 tools；最终 Coordinator 汇总阶段是纯文本调用，空列表直接省略更符合 API 语义。
-            if self.tool_schemas:
-                request["tools"] = self.tool_schemas
-            # Anthropic 的 system 是顶层参数，不塞进 messages；None 时不传，保证普通 Agent 请求
-            # 形态与旧实现一致。Coordinator/Worker/Reviewer 用它形成真正的角色分工。
-            if self.system_prompt:
-                request["system"] = self.system_prompt
-            if self.max_tokens > _STREAMING_TOKEN_THRESHOLD:
-                with self.client.messages.stream(**request) as stream:
-                    response = stream.get_final_message()
-            else:
-                response = self.client.messages.create(**request)
+            # ── Think 前置护栏：先用与实际请求一致的输入 count；只有获准候选才能发给模型。
+            request, blocked = self._preflight_request(i)
+            if request is None:
+                return blocked or "[未完成] 请求前上下文预检未通过。"
+            # preflight 可能原子采用压缩候选；trace 必须记录最终真正发送的 messages。
+            messages_sent = _to_serializable(request["messages"]) if _trace_enabled() else None
+            response = self._dispatch_message(request)
+            # 只有 SDK 已返回 Message，才能确认一次推理请求确实完成了发送/接收；连接前失败不冒充已发送。
+            self._last_preflight["request_sent"] = True
 
             usage = _usage_dict(response.usage)
             self._last_stop_reason = response.stop_reason
@@ -592,6 +799,7 @@ class Agent:
                 # Anthropic SDK 的真实 Message 一定有 model；轻量测试替身可能没有，缺失时记 None，
                 # 不能让可观测性字段反过来改变 Agent Loop（TAOR）的业务状态。
                 response_model=getattr(response, "model", None),
+                preflight=self._last_preflight,
             )
 
             # 打印一行缓存对比汇总，一眼看清「input 只是新增量，其余命中缓存」。
@@ -601,10 +809,14 @@ class Agent:
                               f"in={usage['input_tokens']} "
                               f"(cache_read={cr}, cache_write={cw}) / "
                               f"out={usage['output_tokens']}")
-            # debug 档专属：逐轮追踪上下文规模逼近压缩阈值的过程（不用等压缩真触发才看到数字）。
-            _log("📊 [debug]",
-                 f"当前上下文规模 {current_context_tokens(usage)} / 压缩阈值 {self.compact_threshold}",
-                 level="debug")
+            # count_tokens 是请求前估算；usage 是模型真实执行后的计费统计，两者不能混为一账。
+            _log(
+                "📊 [debug]",
+                f"预检输入 {self._last_preflight.get('final_input_tokens')} / "
+                f"软阈值 {self.compact_threshold} / "
+                f"硬安全预算 {self._last_preflight.get('safe_input_budget')}",
+                level="debug",
+            )
 
             # 把模型这一轮的输出（可能含文字 + 工具请求）原样存回历史。
             self.messages.append({"role": "assistant", "content": response.content})
@@ -637,6 +849,24 @@ class Agent:
                     return "[未完成] pause_turn 含客户端工具调用。"
                 # 纯服务端工具状态已在上面追加，下一次 Think 原样续传。
                 continue
+            if response.stop_reason == "model_context_window_exceeded":
+                # Token Counting 是估算；硬窗口未知或估算略低时，服务端仍可能先触及窗口。
+                # 若响应带半截客户端工具调用，先补配对结果，保证历史仍可被下一任务重放。
+                pending = [block for block in response.content if block.type == "tool_use"]
+                if pending:
+                    reason = "模型实际触及上下文窗口，工具参数可能不完整"
+                    self._record_unexecuted_tool_uses(pending, i, reason)
+                    self.messages.append(self._pair_pending_tool_uses(
+                        pending,
+                        f"[未执行] {reason}。",
+                    ))
+                self._last_run_status = "incomplete"
+                self._last_failure_code = "context_budget_exhausted"
+                partial = final.strip()
+                return (
+                    "[未完成] 模型实际触及上下文窗口。请压缩或缩小输入后重试。"
+                    + (f"\n{partial}" if partial else "")
+                )
             if response.stop_reason in {"max_tokens", "stop_sequence"}:
                 # 原生端点可能在 max_tokens 时留下 tool_use block。它已经进入历史，先补错误结果
                 # 保证下一任务重放历史时仍满足 tool_use/tool_result 配对，再如实标记 incomplete。
@@ -660,12 +890,6 @@ class Agent:
                     return "[未完成] 模型自然结束但没有文本答案。"
                 passed, report = self.validation_gate.verify(self._run_check)
                 if passed:
-                    # 压缩是可观测性/成本优化，不能反过来推翻已经完成且通过验证的业务答案。
-                    # summarizer 异常时保留原历史并交付 final，下个任务仍可继续。
-                    try:
-                        self._maybe_compact(usage)
-                    except Exception as exc:  # noqa: BLE001
-                        _log("🗜️ [压缩失败]", f"保留原历史：{type(exc).__name__}: {exc}", level="error")
                     _log("\n✅ [完成]", "模型自然结束，且通过验证门，循环结束。")
                     return final
                 _log("\n🚧 [验证门]", "未通过，打回让模型继续修复。", level="error")
@@ -848,7 +1072,6 @@ class Agent:
                 self._last_run_status = "incomplete"
                 return f"[未完成] 终态提交后的验证门未通过。\n{report}"
 
-            self._maybe_compact(usage)
 
         # 达到最大轮数还没结束 —— 护栏触发。结构化接口必须把它标成 incomplete，
         # 不能再让编排层看到一个非空字符串就误以为成功。
@@ -865,6 +1088,7 @@ class Agent:
         response_content=None,
         *,
         response_model: str | None = None,
+        preflight: dict | None = None,
     ) -> None:
         """把这一轮的完整 in/out 和请求/响应模型身份落盘，供实地调查。
 
@@ -893,6 +1117,7 @@ class Agent:
             "tools": _to_serializable(self.tool_schemas),
             "stop_reason": stop_reason,
             "usage": usage,
+            "preflight": _to_serializable(preflight),
             "trace_metadata": _to_serializable(self.trace_metadata),
             "messages_sent": messages_sent,
             "response_content": _to_serializable(response_content),
@@ -913,11 +1138,16 @@ class Agent:
             "max_tokens": self.max_tokens,
             "messages": [{"role": "user", "content": prompt}],
         }
-        if self.max_tokens > _STREAMING_TOKEN_THRESHOLD:
-            with self.client.messages.stream(**request) as stream:
-                resp = stream.get_final_message()
-        else:
-            resp = self.client.messages.create(**request)
+        # 摘要请求也可能因为要总结的中段本身过大而越界。这里只 count 并阻止，不递归压缩
+        # “压缩任务”；外层 preflight 会转入唯一的 micro-compaction 兜底。
+        summary_tokens = self._count_request(request)
+        # 这次 count 属于当前 preflight 的语义尝试，但不能让候选自身“看起来多 count 一次”失真。
+        budget = self._safe_input_budget()
+        if budget is not None and summary_tokens > budget:
+            raise RuntimeError(
+                f"压缩摘要请求 {summary_tokens} token 超过安全预算 {budget}"
+            )
+        resp = self._dispatch_message(request)
         _merge_usage(self._last_run_usage, _usage_dict(resp.usage))
         if resp.stop_reason != "end_turn":
             raise RuntimeError(f"压缩摘要未完整结束：stop_reason={resp.stop_reason}")
@@ -949,9 +1179,12 @@ class Agent:
             # 压缩只需回读/检索核实，绝不需要 write_file；能力边界在派生点正向声明。
             tools=tool_schemas_for({"read_file", "run_command"}),
             max_iterations=15,
+            max_tokens=self.max_tokens,
             check_command=None,
             # 防压缩子 Agent 再按环境变量派生压缩子子 Agent；一层派生是代码硬边界。
             compact_executor="self",
+            max_input_tokens=self.max_input_tokens,
+            allow_preflight_compaction=False,
             trace_metadata={
                 **self.trace_metadata,
                 "role": "compact_subagent",
@@ -1000,34 +1233,6 @@ class Agent:
         finally:
             self._run_lock.release()
 
-    def _maybe_compact(self, usage: dict) -> None:
-        """用本轮真实 usage 判断上下文规模，超阈值就压缩 self.messages。
-
-        压缩把中段历史换成一条摘要，self.messages 原地替换成更短的列表；
-        下一轮 Think 发出去的就是压缩后的历史。API 无状态，只认我们发的 messages，
-        它不知道发生过压缩——控制权全在我们本地。
-
-        T5-A：被动压缩带上会话级偏好 self.compact_directive、按 self.compact_executor 选执行者。
-        """
-        tokens = current_context_tokens(usage)
-        if not should_compact(usage, threshold=self.compact_threshold):
-            return  # 没超阈值，不动。
-
-        _log("\n🗜️  [压缩]", f"上下文规模 {tokens} token 超阈值，开始压缩中段历史…")
-        new_messages, stats = compact_messages(
-            self.messages, summarizer=self._pick_summarizer(),
-            directive=self.compact_directive,
-        )
-        if stats is None:
-            # 规模超了但轮数还不够压（切不出中段）——如实说明，不假装压了。
-            _log("🗜️  [压缩]", "轮数不足以压缩（中段为空），本轮跳过。")
-            return
-        self.messages = new_messages
-        _log("🗜️  [压缩]",
-             f"完成：消息 {stats['before_msgs']}→{stats['after_msgs']} 条，"
-             f"压掉 {stats['compacted_turns']} 轮，保留最近 {stats['kept_recent_turns']} 轮，"
-             f"摘要 {stats['summary_chars']} 字符。")
-
 
 # ── P5 Sub-agent 工具：定义在这里（而非 tools.py）以解开循环导入 ──
 # 为什么放 agent.py：spawn_subagent 需要 new 一个 Agent。若放 tools.py，就得
@@ -1043,6 +1248,7 @@ def spawn_subagent(
     task: str,
     _model: str | None = None,
     _max_tokens: int | None = None,
+    _max_input_tokens: int | None = None,
     _parent_trace: str | None = None,
 ) -> ToolOutput:
     """派生一个独立的子 agent 去完成一个子任务，只返回它的最终结论（上下文隔离）。
@@ -1060,6 +1266,7 @@ def spawn_subagent(
         tools=subagent_tool_schemas(),
         max_iterations=15,
         max_tokens=_max_tokens,
+        max_input_tokens=_max_input_tokens,
         check_command=None,
         compact_executor="self",
         trace_metadata={

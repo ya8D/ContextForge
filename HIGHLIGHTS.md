@@ -46,8 +46,15 @@
 
 ## 上下文压缩：本地重写，可客制化
 
-- **压缩 = 在本地重写 messages，不是截断 API**：把中段多轮原文换成一条前情摘要，下轮发出去就短了，
-  API 无从知晓。控制权全在本地。→ [context.py `compact_messages`](./src/contextforge/context.py)
+- **请求前 Token Guard，而不是事后补救**：每轮先用官方 `messages.count_tokens` 统计与实际请求一致的
+  model/messages/system/tools；达到软阈值先压缩并 recount，显式配置硬窗口后，仍超安全预算就不发送推理。
+  Token Counting 是免费估算且独立限流，不混入真实 Messages usage。→ [agent.py `_preflight_request`](./src/contextforge/agent.py)
+- **压缩仍是本地重写 messages**：Token Counting 只负责量尺寸；真正压缩仍在本地生成候选列表。当前
+  `run(task)` 的完整用户原文、全会话最早入口及各自第一完整轮原文保护，只有真正中段进入摘要。
+  → [context.py `compact_messages_protected`](./src/contextforge/context.py)
+- **摘要失败不等于可以乱删旧轮**：系统无法仅按时间判断旧轮重要性，故唯一自动兜底只清理可重建的旧
+  `tool_result.content`，不删除任何完整轮；仍超硬预算就返回 incomplete，让用户显式决定 `/compact` 或 reset。
+  → [context.py `micro_compact_tool_results`](./src/contextforge/context.py)
 - **压缩偏好可注入 + 执行者可切换**：用户能用自然语言指定压缩时保什么删什么；执行者可从「盲总结一次」
   切成「派带工具的子 agent」——后者能 `read_file` 回读核实结论是否还成立，而非凭记忆。
   → [agent.py `_pick_summarizer` / `_summarize_via_subagent`](./src/contextforge/agent.py)
