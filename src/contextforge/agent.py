@@ -131,8 +131,8 @@ def _resolve_compact_threshold(explicit: int | None) -> int:
 # 对照 Claude Code：其辅助调用用 4096，主循环有「不够时升级 max_tokens」的机制；本项目不做动态
 # 升级那套（过重），取一个够用的静态默认 + 可配置即可。
 MAX_TOKENS_DEFAULT = 8192
-# Token Counting 是估算值，官方说明与真实 input usage 可能有小幅差异；硬准入额外保留至少
-# 4096 token、或窗口的 1%（取较大者），避免把估算误差顶到物理边界。
+# Token Counting 是估算值。硬准入额外保留至少 4096 token、或窗口的 10%（取较大者）。
+# 10% 是用户在长期使用上下文窗口后的经验安全边界，不是 Anthropic 官方保证或公布的误差上限。
 _MIN_INPUT_SAFETY_MARGIN = 4096
 # Anthropic Python SDK 对预计超过 10 分钟的同步请求强制使用 stream；当前阈值约 21,333。
 _STREAMING_TOKEN_THRESHOLD = 21_333
@@ -600,7 +600,7 @@ class Agent:
         """硬窗口已知时的 Token Counting 估算安全余量。"""
         if self.max_input_tokens is None:
             return None
-        return max(_MIN_INPUT_SAFETY_MARGIN, self.max_input_tokens // 100)
+        return max(_MIN_INPUT_SAFETY_MARGIN, self.max_input_tokens // 10)
 
     def _safe_input_budget(self) -> int | None:
         """为本轮完整输出预留空间后的最大安全输入 token。"""

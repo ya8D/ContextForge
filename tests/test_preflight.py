@@ -254,6 +254,16 @@ def test_preflight_counts_exact_request_before_create(monkeypatch):
     assert counted[0]["tools"] == [local.schema]
 
 
+def test_input_safety_margin_uses_user_experience_ten_percent_floor():
+    """经验策略：硬窗口的 10% 与 4096 取大者；旧 1% 实现会在 1M 用例稳定失败。"""
+    small = Agent(max_input_tokens=20_000, max_tokens=100, check_command=None)
+    large = Agent(max_input_tokens=1_000_000, max_tokens=8192, check_command=None)
+
+    assert small._input_safety_margin() == 4096
+    assert large._input_safety_margin() == 100_000
+    assert large._safe_input_budget() == 1_000_000 - 8192 - 100_000
+
+
 def test_invalid_explicit_max_input_tokens_is_rejected():
     with pytest.raises(ValueError, match="正整数"):
         Agent(max_input_tokens=0)

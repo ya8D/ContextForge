@@ -18,7 +18,8 @@
 - **请求前准入**：`_run_loop` 每轮先从唯一 request 构造器提取相同的 model/messages/system/tools 调官方
   Token Counting；压缩候选必须 recount 后才能发送。`compact_threshold` 明确为质量/成本软阈值；新增
   `CONTEXTFORGE_MAX_INPUT_TOKENS` 作为代理场景的显式硬窗口，安全预算还预留 `max_tokens` 与至少 4096/
-  窗口 1% 的估算余量。count 失败 fail-closed，估算值不混入真实 Messages/team usage。
+  窗口 10% 的经验余量。10% 是用户长期使用后的项目经验，不冒充 Anthropic 官方误差保证；count 失败
+  fail-closed，估算值不混入真实 Messages/team usage。
 - **用户输入与第一轮保护**：不再把全会话 `messages[0]` 偷懒当成当前任务。`_run_once` 保存最近一次
   `run(task)` 追加消息的对象边界；语义压缩逐字保留该完整用户原文、全会话最早入口，以及二者对应的
   第一完整轮，最近 3 轮也原样保留。测试用 `FIRST_SENTINEL` 证明第一轮内容既不进入摘要 prompt，也不被
@@ -28,7 +29,7 @@
   分析、用户自然语言、tool_use_id/is_error 与配对。仍超限则 `incomplete/context_budget_exhausted`，
   `request_sent=false`，由用户显式选择 `/compact <要求>`、缩小输入/工具或 reset。
 - **测试有效性**：新增专项测试先在旧生产代码上 collection fail（缺少受保护压缩函数），恢复实现后
-  **11 passed**。四次定向变异分别绕过 preflight、让 count 失败放行、删除 tool_result 破坏配对、把第一轮
+  **12 passed**。四次定向变异分别绕过 preflight、让 count 失败放行、删除 tool_result 破坏配对、把第一轮
   纳入摘要，四条目标测试均失败；恢复后通过。真实 API 验证 count 值直接阻止推理（create/stream 0 次），
   受保护语义压缩在真实 8 轮工具任务中完成并继续任务，Sub-agent STALE/CURRENT 回读测试仍通过。
 - **严格审查补强**：非 e2e 默认隔离 Token Counting 网络副作用，避免只 mock create 的旧测试偷偷访问真实
@@ -39,8 +40,8 @@
   普通 `spawn_subagent` 继承父 Agent 的显式硬窗口，压缩 Sub-agent 同时继承父级 `max_input_tokens` 与
   `max_tokens`，避免代理场景绕过护栏或因错误输出预留拒绝启动；两条 e2e 用工具审计确认 8 个命令真实
   成功且顺序正确，不再只信模型文字自报。
-- **最终验证**：专项 **11 passed**；全量非 e2e **164 passed, 22 deselected**；目标真实上下文测试
-  **4 passed**；完整真实 API 套件 **22 passed, 164 deselected**。
+- **最终验证**：专项 **12 passed**；全量非 e2e **165 passed, 22 deselected**；本次 10% 边界的
+  真实 Token Counting 准入 e2e **1 passed**；此前完整真实 API 套件 **22 passed, 164 deselected**。
 
 ---
 
