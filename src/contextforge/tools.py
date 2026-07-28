@@ -44,6 +44,7 @@ _INJECTED_CONTEXT_PARAMS = {
     "_timeout",
     "_model",
     "_max_tokens",
+    "_max_input_tokens",
     "_parent_trace",
 }
 

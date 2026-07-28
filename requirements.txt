@@ -1,6 +1,6 @@
 # ContextForge 依赖
 # anthropic: Claude 官方 Python SDK（本项目底层模型 API）
-anthropic>=0.40.0
+anthropic>=0.41.0
 # python-dotenv: 从 .env 读取代理凭据（ANTHROPIC_AUTH_TOKEN / BASE_URL / MODEL）。
 # 这套凭据由 VSCode 扩展注入，普通终端拿不到，故落到本地 .env（不进 git）。
 python-dotenv>=1.0.0

@@ -25,6 +25,8 @@ context.py —— 上下文管理（Memory 第一层：会话内压缩）
   想亲眼看"塞到 500K 不压会怎样"，这本身就是学习。阈值是可配的，不是物理上限。
 """
 
+import copy
+
 
 # 压缩触发阈值：当前上下文规模（真实 token）超过这个数就压缩。
 # 500K = 1M 窗口的一半（本项目决策，比官方 150K 激进，见模块 docstring）。
@@ -75,6 +77,192 @@ def _split_into_turns(middle_messages: list[dict]) -> list[list[dict]]:
         else:
             turns[-1].append(msg)
     return turns
+
+
+def _task_anchor_index(messages: list[dict], task_anchor: dict) -> int:
+    """按对象身份定位本次 ``run(task)`` 追加的完整用户原文。
+
+    同一个 Agent 会连续执行多个任务，不能把全会话 ``messages[0]`` 永久当作当前任务。
+    Agent 在 ``_run_once`` 中保存本次追加消息的对象引用，这里只接受那个精确边界；找不到就
+    拒绝压缩，不能猜一个相等字符串后误伤别的轮次。
+    """
+    for index, message in enumerate(messages):
+        if message is task_anchor:
+            return index
+    raise ValueError("当前任务入口消息不在 messages 中，拒绝改写历史")
+
+
+def _protected_current_turns(
+    messages: list[dict],
+    task_anchor: dict,
+    keep_recent_turns: int,
+) -> tuple[int, list[list[dict]], list[list[dict]], list[list[dict]]]:
+    """切出当前任务的第一轮、中段和最近轮；第一轮永远不进入可压区。"""
+    anchor_index = _task_anchor_index(messages, task_anchor)
+    turns = _split_into_turns(messages[anchor_index + 1:])
+    if not turns:
+        return anchor_index, [], [], []
+
+    first = turns[:1]
+    remaining = turns[1:]
+    if len(remaining) <= keep_recent_turns:
+        return anchor_index, first, [], remaining
+    return (
+        anchor_index,
+        first,
+        remaining[:-keep_recent_turns],
+        remaining[-keep_recent_turns:],
+    )
+
+
+def compact_messages_protected(
+    messages: list[dict],
+    summarizer,
+    task_anchor: dict,
+    keep_recent_turns: int = KEEP_RECENT_TURNS,
+    directive: str | None = None,
+) -> tuple[list[dict], dict] | tuple[list[dict], None]:
+    """按本次任务边界做语义压缩，并逐字保留入口原文与第一完整轮。
+
+    与旧 ``compact_messages`` 的区别是：当前任务入口不再被假定为全会话第一条消息；当前
+    任务第一完整轮也被单独保护。此前的会话历史和当前任务真正的中段可以进入摘要，但最新
+    ``run(task)`` 的完整用户原文、第一轮和最近若干轮始终以原对象保留。
+    """
+    if not messages:
+        return messages, None
+
+    anchor_index, first, middle, recent = _protected_current_turns(
+        messages, task_anchor, keep_recent_turns,
+    )
+
+    # 会话最早的用户入口和第一完整轮也是长期锚点。多任务会话不能为了保护“最新任务”
+    # 反过来把最早任务及其第一轮塞进摘要；它们与当前任务锚/第一轮同时原文保留。
+    session_head: list[dict] = []
+    session_first: list[list[dict]] = []
+    prior_middle: list[list[dict]] = []
+    if anchor_index > 0:
+        session_head = messages[:1]
+        prior_turns = _split_into_turns(messages[1:anchor_index])
+        session_first = prior_turns[:1]
+        prior_middle = prior_turns[1:]
+
+    prior_middle_messages = [m for turn in prior_middle for m in turn]
+    current_middle_messages = [m for turn in middle for m in turn]
+    if not prior_middle_messages and not current_middle_messages:
+        return messages, None
+
+    session_first_messages = [m for turn in session_first for m in turn]
+    current_first_messages = [m for turn in first for m in turn]
+    recent_messages = [m for turn in recent for m in turn]
+    marker = "[前情摘要 · 由 context.py 压缩生成"
+    marker += f"，按要求：{directive}]" if directive else "]"
+    summaries: list[dict] = []
+
+    if prior_middle_messages:
+        prior_summary = summarizer(
+            _build_summary_prompt(directive)
+            + _render_middle_for_summary(prior_middle_messages)
+        )
+        summaries.append({"role": "user", "content": f"{marker}\n{prior_summary}"})
+    if current_middle_messages:
+        current_summary = summarizer(
+            _build_summary_prompt(directive)
+            + _render_middle_for_summary(current_middle_messages)
+        )
+        summaries.append({"role": "user", "content": f"{marker}\n{current_summary}"})
+
+    if anchor_index > 0:
+        # 两段摘要各留在自己的时间位置，避免把“当前任务已做步骤”挪到当前入口之前。
+        new_messages = [*session_head, *session_first_messages]
+        if prior_middle_messages:
+            new_messages.append(summaries.pop(0))
+        new_messages.append(task_anchor)
+        new_messages.extend(current_first_messages)
+        if current_middle_messages:
+            new_messages.append(summaries.pop(0))
+        new_messages.extend(recent_messages)
+    else:
+        new_messages = [task_anchor, *current_first_messages, *summaries, *recent_messages]
+    return new_messages, {
+        "before_msgs": len(messages),
+        "after_msgs": len(new_messages),
+        "compacted_turns": len(prior_middle) + len(middle),
+        "kept_recent_turns": len(recent),
+        "summary_chars": sum(
+            len(message["content"].split("\n", 1)[-1])
+            for message in new_messages
+            if isinstance(message.get("content"), str)
+            and message["content"].startswith("[前情摘要")
+        ),
+    }
+
+
+def micro_compact_tool_results(
+    messages: list[dict],
+    task_anchor: dict,
+    keep_recent_turns: int = KEEP_RECENT_TURNS,
+) -> tuple[list[dict], dict] | tuple[list[dict], None]:
+    """只清理可压区的旧工具结果正文，不删除任何消息或完整轮。
+
+    这是语义摘要失败后的唯一自动降级。用户自然语言、assistant 分析、当前任务入口、当前
+    第一完整轮和最近若干轮均原文保留；tool_result 的配对 ID 与错误状态也保持不变。
+    """
+    if not messages:
+        return messages, None
+
+    anchor_index, _first, middle, _recent = _protected_current_turns(
+        messages, task_anchor, keep_recent_turns,
+    )
+    eligible_before_current: list[dict] = []
+    if anchor_index > 0:
+        prior_turns = _split_into_turns(messages[1:anchor_index])
+        # 全会话第一条用户入口和第一完整轮同样受保护，只清更晚的旧工具正文。
+        eligible_before_current = [m for turn in prior_turns[1:] for m in turn]
+    eligible_ids = {
+        id(message)
+        for message in [
+            *eligible_before_current,
+            *(m for turn in middle for m in turn),
+        ]
+    }
+    candidate = list(messages)
+    cleared = 0
+    saved_chars = 0
+
+    for index, message in enumerate(messages):
+        if id(message) not in eligible_ids or not isinstance(message.get("content"), list):
+            continue
+        new_message = copy.deepcopy(message)
+        changed = False
+        for block in new_message["content"]:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            original = str(block.get("content", ""))
+            tool_use_id = block.get("tool_use_id", "?")
+            replacement = (
+                "[旧工具结果正文已清理："
+                f"tool_use_id={tool_use_id}，原长度={len(original)} 字符]"
+            )
+            if len(replacement) >= len(original):
+                continue
+            block["content"] = replacement
+            cleared += 1
+            saved_chars += len(original) - len(replacement)
+            changed = True
+        if changed:
+            candidate[index] = new_message
+
+    if not cleared:
+        return messages, None
+    return candidate, {
+        "before_msgs": len(messages),
+        "after_msgs": len(candidate),
+        "compacted_turns": 0,
+        "kept_recent_turns": len(_recent),
+        "summary_chars": 0,
+        "cleared_tool_results": cleared,
+        "saved_chars": saved_chars,
+    }
 
 
 def _render_middle_for_summary(middle_messages: list[dict]) -> str:
